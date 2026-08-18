@@ -86,11 +86,24 @@ struct OpenAITranscriptionProvider: TranscriptionProvider {
     }
 }
 
-/// OpenRouter has no published parameter documentation for transcription at plan time ("the
-/// model list is not public"), so this conformance falls back to the OpenAI-compatible singular
-/// `language` plus free-text `prompt` shape that Groq also uses, on the assumption that an
-/// OpenRouter-proxied Whisper endpoint mirrors the upstream API it forwards to. Unverified
-/// against a real OpenRouter key; revisit with a failing test the day that key exists.
+/// OpenRouter proxies transcription without documenting its parameters, and this conformance sends
+/// the OpenAI-compatible singular `language` plus free-text `prompt` shape that Groq also uses.
+///
+/// **VERIFIED 2026-08-18 with a real key, and the news is bad for the glossary.** The endpoint
+/// exists and works: `POST /api/v1/audio/transcriptions` returns HTTP 200 with a transcript and a
+/// cost for `gpt-transcribe`, `openai/gpt-transcribe`, `whisper-1` and `openai/whisper-1`, none of
+/// which appear anywhere in the 413-entry public model list. But it **silently discards parameters
+/// it does not handle**, proven by sending a deliberately invented field
+/// (`kesinlikle_boyle_bir_parametre_yok=1`) and getting a normal HTTP 200 transcript back rather
+/// than a rejection. `prompt` is among the things it drops: the same clip returns byte-identical
+/// text with and without a glossary, and `keywords` has no effect either.
+///
+/// So selecting this provider silently disables the glossary, which is the one accuracy lever this
+/// app has measured a real gain from ("pikutiyle" to "PQT ile"). It is left in place because it
+/// transcribes correctly and is the only way to reach OpenAI's models without a second account, but
+/// it is a downgrade for Turkish technical speech and not a peer of the Groq path. Anyone testing
+/// `gpt-transcribe`'s structured `keywords` field needs a direct OpenAI key; it cannot be evaluated
+/// through here.
 struct OpenRouterTranscriptionProvider: TranscriptionProvider {
     let modelId: String
 
