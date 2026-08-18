@@ -184,21 +184,34 @@ final class ShortcutCoordinator: @unchecked Sendable {
         /// Namespace for the default keyed bindings, kept out of `CarbonHotkey` so that type stays a
         /// plain registration wrapper.
         enum Binding {
-            /// Control-Option-D, unlikely to collide with an app shortcut.
+            /// All three carry Command on top of Control and Option, and the reason is measured
+            /// rather than cautious: Control-Option-D and Control-Option-C, the previous defaults,
+            /// both collide with Magnet, which was running on this machine and owns
+            /// Control-Option-D, F and G for window thirds and Control-Option-C for centring. A
+            /// global hot key wins over an application's own, so the previous defaults silently took
+            /// two window commands away, and pressing the toggle moved the window instead of
+            /// starting a dictation.
+            ///
+            /// Adding Command is what buys the room. Window managers and editors spend
+            /// Control-Option heavily and almost nothing claims Control-Option-Command, and the
+            /// three modifiers sit next to each other on the left of the keyboard, so the grip is one
+            /// hand. Carbon registration cannot be used to check any of this: registering
+            /// Command-Space, which Spotlight owns, succeeds, so a successful registration says
+            /// nothing about whether the key will actually arrive.
             static let defaultToggle = CarbonHotkey.Binding(
                 keyCode: UInt32(kVK_ANSI_D),
-                modifiers: UInt32(controlKey | optionKey)
+                modifiers: UInt32(controlKey | optionKey | cmdKey)
             )
-            /// Control-Option-C. Escape is deliberately not used: a global Escape hot key would take
-            /// the key away from every app in the session.
+            /// Escape is deliberately not used for cancel: a global Escape hot key would take the
+            /// key away from every application in the session.
             static let defaultCancel = CarbonHotkey.Binding(
                 keyCode: UInt32(kVK_ANSI_C),
-                modifiers: UInt32(controlKey | optionKey)
+                modifiers: UInt32(controlKey | optionKey | cmdKey)
             )
-            /// Control-Option-P, for "prompt": Mode 2, the dictation that becomes an English prompt.
+            /// P for "prompt": Mode 2, the dictation that becomes an English prompt.
             static let defaultPromptToggle = CarbonHotkey.Binding(
                 keyCode: UInt32(kVK_ANSI_P),
-                modifiers: UInt32(controlKey | optionKey)
+                modifiers: UInt32(controlKey | optionKey | cmdKey)
             )
         }
     }

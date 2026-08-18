@@ -20,7 +20,10 @@ enum ProviderError: Error, LocalizedError, Equatable {
     /// The decoded response's per-segment quality fields (Groq only) crossed the reject
     /// threshold: a high aggregate `no_speech_prob` or a sharply negative aggregate
     /// `avg_logprob`.
-    case lowQualityTranscript(reason: String)
+    /// - Parameter transcript: what the model actually returned. Carried so the rejected text
+    ///   reaches the log: a threshold that discards its own evidence cannot be tuned, and this one
+    ///   fired on a real dictation that then left no trace anywhere.
+    case lowQualityTranscript(reason: String, transcript: String)
 
     var errorDescription: String? {
         switch self {
@@ -30,7 +33,7 @@ enum ProviderError: Error, LocalizedError, Equatable {
             return "Transcription request failed (HTTP \(status)): \(message)"
         case .invalidResponse:
             return "The transcription provider returned a response that could not be understood."
-        case .lowQualityTranscript(let reason):
+        case .lowQualityTranscript(let reason, _):
             return "The transcription looked unreliable and was rejected: \(reason)"
         }
     }

@@ -541,6 +541,25 @@ final class DictationPipeline {
             remove(temporaryFiles)
             finish(message: "Cancelled", isFailure: false)
         } catch {
+            // A transcript the quality gate turned down still gets a log line, carrying the text and
+            // the numbers that rejected it. Every other failure has no transcript to record: there is
+            // no text, so a record would hold only the reason the log already shows on the next
+            // successful line. This branch exists because a real rejection reached the user as one
+            // sentence and left nothing behind, so the threshold that produced it could not be
+            // checked against anything.
+            if case ProviderError.lowQualityTranscript(let reason, let transcript) = error {
+                appendRecord(
+                    timestamp: timestamp,
+                    mode: mode,
+                    audioPath: nil,
+                    duration: 0,
+                    rawTranscript: transcript,
+                    finalText: "",
+                    reason: "Transcription rejected by the quality gate: \(reason)",
+                    timings: timings.record(totalSeconds: Self.elapsed(since: releasedAt)),
+                    configuration: configuration
+                )
+            }
             remove(temporaryFiles)
             finish(message: error.localizedDescription, isFailure: true)
         }

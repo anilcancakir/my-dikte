@@ -149,19 +149,37 @@ enum TranscriptionQualityGate {
     /// Below this aggregate `avg_logprob`, the model was guessing rather than transcribing.
     static let minAverageLogprob = -1.0
 
-    static func evaluate(_ response: TranscriptionResponse) -> Bool {
+    /// Why a response was rejected, carrying the numbers behind the decision.
+    ///
+    /// The gate used to answer with a bare `Bool` and the caller attached a fixed sentence, so a
+    /// real rejection reached the user as "aggregate no_speech_prob or avg_logprob crossed the
+    /// reject threshold" with no indication of which one fired, how far past it was, or what the
+    /// threshold even is. That is unactionable for the user and untunable for us.
+    struct Rejection: Equatable {
+        let reason: String
+    }
+
+    /// The rejection for `response`, or `nil` when it passes.
+    static func rejection(for response: TranscriptionResponse) -> Rejection? {
         guard let segments = response.segments, !segments.isEmpty else {
             // No segments: the provider either does not offer these fields (the client skips
             // the gate entirely in that case) or Groq itself returned none. Either way there is
             // nothing to aggregate, so this passes rather than rejecting on absence.
-            return true
+            return nil
         }
 
         let noSpeechProbs = segments.compactMap(\.noSpeechProb)
         if !noSpeechProbs.isEmpty {
             let mean = noSpeechProbs.reduce(0, +) / Double(noSpeechProbs.count)
             if mean > maxAverageNoSpeechProb {
-                return false
+                return Rejection(
+                    reason: String(
+                        format: "mean no_speech_prob %.2f across %d segment(s) is above the %.1f limit",
+                        mean,
+                        noSpeechProbs.count,
+                        maxAverageNoSpeechProb
+                    )
+                )
             }
         }
 
@@ -169,11 +187,24 @@ enum TranscriptionQualityGate {
         if !avgLogprobs.isEmpty {
             let mean = avgLogprobs.reduce(0, +) / Double(avgLogprobs.count)
             if mean < minAverageLogprob {
-                return false
+                return Rejection(
+                    reason: String(
+                        format: "mean avg_logprob %.2f across %d segment(s) is below the %.1f limit",
+                        mean,
+                        avgLogprobs.count,
+                        minAverageLogprob
+                    )
+                )
             }
         }
 
-        return true
+        return nil
+    }
+
+    /// Kept because the existing tests read the gate as a yes or no, which is still the question the
+    /// client asks; the reason is what the user and the log need.
+    static func evaluate(_ response: TranscriptionResponse) -> Bool {
+        rejection(for: response) == nil
     }
 }
 
@@ -331,9 +362,12 @@ final class TranscriptionClient: @unchecked Sendable {
                 guard let decoded = try? JSONDecoder().decode(TranscriptionResponse.self, from: data) else {
                     throw ProviderError.invalidResponse
                 }
-                if provider.offersQualityFields, !TranscriptionQualityGate.evaluate(decoded) {
+                if provider.offersQualityFields,
+                    let rejection = TranscriptionQualityGate.rejection(for: decoded)
+                {
                     throw ProviderError.lowQualityTranscript(
-                        reason: "aggregate no_speech_prob or avg_logprob crossed the reject threshold"
+                        reason: rejection.reason,
+                        transcript: decoded.text
                     )
                 }
                 return Result(text: decoded.text, isReusedConnection: isReusedConnection)

@@ -150,6 +150,53 @@ struct TranscriptionClientTests {
         #expect(TranscriptionQualityGate.evaluate(response) == false)
     }
 
+    /// A rejection that only says "a threshold was crossed" cannot be acted on or tuned: which of
+    /// the two fired, and how far past it was, is the whole content of the finding. A real rejection
+    /// on this machine reached the user as a bare sentence with no numbers, and the dictation behind
+    /// it was never logged, so there was nothing left to check the threshold against.
+    @Test("a rejection names the field that fired and the value it measured")
+    func rejectionNamesTheFieldAndTheValue() {
+        let response = TranscriptionResponse(
+            text: "...",
+            segments: [
+                TranscriptionResponse.Segment(noSpeechProb: 0.95, avgLogprob: -0.1, compressionRatio: 1.0),
+                TranscriptionResponse.Segment(noSpeechProb: 0.9, avgLogprob: -0.1, compressionRatio: 1.0),
+            ]
+        )
+
+        let rejection = TranscriptionQualityGate.rejection(for: response)
+        #expect(rejection != nil)
+        #expect(rejection?.reason.contains("no_speech_prob") == true)
+        #expect(rejection?.reason.contains("0.93") == true)
+        #expect(rejection?.reason.contains("0.6") == true)
+    }
+
+    @Test("the logprob rejection reports its own average and its own threshold")
+    func logprobRejectionReportsItsValue() {
+        let response = TranscriptionResponse(
+            text: "...",
+            segments: [
+                TranscriptionResponse.Segment(noSpeechProb: 0.05, avgLogprob: -1.8, compressionRatio: 1.0),
+                TranscriptionResponse.Segment(noSpeechProb: 0.05, avgLogprob: -1.6, compressionRatio: 1.0),
+            ]
+        )
+
+        let rejection = TranscriptionQualityGate.rejection(for: response)
+        #expect(rejection?.reason.contains("avg_logprob") == true)
+        #expect(rejection?.reason.contains("-1.70") == true)
+    }
+
+    @Test("a response that passes has no rejection")
+    func passingResponseHasNoRejection() {
+        let response = TranscriptionResponse(
+            text: "merhaba dunya",
+            segments: [
+                TranscriptionResponse.Segment(noSpeechProb: 0.02, avgLogprob: -0.2, compressionRatio: 1.1)
+            ]
+        )
+        #expect(TranscriptionQualityGate.rejection(for: response) == nil)
+    }
+
     // MARK: Missing key error
 
     @Test("a missing key produces a typed error naming which account and where to enter it")
