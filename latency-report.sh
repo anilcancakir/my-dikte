@@ -79,15 +79,25 @@ for record in records:
         f"{timings['insertMs']:>5.0f}  {note}"
     )
 
-# Runs that never reached the network are excluded from the latency summary: a room-tone rejection
-# costs 7 ms and would drag the median far below anything the user experiences.
-completed = [r for r in records if r["timings"]["transcribeMs"] > 0]
-rejected = len(records) - len(completed)
+# Two kinds of run are excluded from the latency summary, and for the same reason: neither put text at
+# the caret, so neither is a latency the user ever waited through. A room-tone rejection costs 7 ms and
+# never reaches the network. A transcription the quality gate turned down does reach the network, so
+# transcribeMs alone cannot tell them apart, and counting it would drag the median down with a run that
+# produced nothing.
+def landed(record):
+    return record["timings"]["transcribeMs"] > 0 and record["finalText"] != ""
+
+completed = [r for r in records if landed(r)]
+no_network = [r for r in records if r["timings"]["transcribeMs"] == 0]
+gate_rejected = [r for r in records if r["timings"]["transcribeMs"] > 0 and r["finalText"] == ""]
 
 print()
-if rejected:
-    print(f"{rejected} record(s) never reached the network (silence rejected before the API call), "
-          f"excluded from the summary below.")
+if no_network:
+    print(f"{len(no_network)} record(s) never reached the network (silence rejected before the API "
+          f"call), excluded from the summary below.")
+if gate_rejected:
+    print(f"{len(gate_rejected)} record(s) reached the network but inserted nothing (transcript "
+          f"rejected, or discarded as a stock phrase), also excluded.")
 if not completed:
     sys.exit("No completed dictations to summarise.")
 
