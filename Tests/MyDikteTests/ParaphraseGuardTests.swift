@@ -187,6 +187,32 @@ struct ParaphraseGuardTests {
         #expect(result == .accept)
     }
 
+    /// Measured on a real dictation: the raw transcript had "hala" and the cleanup model wrote "hâlâ",
+    /// the correct Turkish spelling with its circumflexes. The guard rejected the entire cleanup with
+    /// "introduced a word that was not spoken: hâlâ", so the whole run fell back to the raw transcript
+    /// over two diacritics. The phonetic exemption could not save it either: both words reduce to the
+    /// two-consonant skeleton "hl", which is below the length floor by design.
+    @Test("a Turkish circumflex added by cleanup is the same word, not a new one")
+    func addedCircumflexIsNotAnIntroducedWord() {
+        let result = ParaphraseGuard.check(
+            raw: "bir de hala kurtaramadığım kelime var",
+            cleaned: "Bir de hâlâ kurtaramadığım kelime var.",
+            glossary: []
+        )
+        #expect(result == .accept)
+    }
+
+    @Test(
+        "diacritic-only differences in either direction are accepted",
+        arguments: [
+            ("kar yagisi vardi", "kâr yağışı vardı"),
+            ("rüzgâr çok kuvvetli", "rüzgar çok kuvvetli"),
+        ]
+    )
+    func diacriticDifferencesAreAccepted(raw: String, cleaned: String) {
+        #expect(ParaphraseGuard.check(raw: raw, cleaned: cleaned, glossary: []) == .accept)
+    }
+
     /// The counterpart, and the reason the exemption cannot simply allow any single new word: this is the
     /// substitution the introduced-word check was built for, and it must still be caught. "again" sounds
     /// nothing like "yine", so a phonetic rule separates the two cases where a word count cannot.

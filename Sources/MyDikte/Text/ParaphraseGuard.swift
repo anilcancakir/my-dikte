@@ -162,17 +162,28 @@ public enum ParaphraseGuard {
         return true
     }
 
-    /// The filler words and thinking sounds `CLEANUP_PROMPT_TR` names, lowercased.
-    private static let fillers: Set<String> = [
-        "ıı", "ii", "ee", "ııı", "iii", "mmm", "mm", "hmm", "aa", "eee",
-        "hani", "yani", "işte", "şey", "falan", "böyle", "aslında", "ya",
-    ]
+    /// The filler words and thinking sounds `CLEANUP_PROMPT_TR` names, folded the same way
+    /// `stems(of:)` folds so that "işte" and "aslında" can still match once diacritics are gone.
+    private static let fillers: Set<String> = Set(
+        [
+            "ıı", "ii", "ee", "ııı", "iii", "mmm", "mm", "hmm", "aa", "eee",
+            "hani", "yani", "işte", "şey", "falan", "böyle", "aslında", "ya",
+        ].map(TurkishFolding.normalise)
+    )
 
-    /// Lowercased, punctuation-free words. Deliberately local rather than reusing the Turkish
-    /// folding used for hallucination matching: this comparison is between two renderings of the
-    /// same utterance, so it needs casing and punctuation gone and nothing more.
+    /// Lowercased, punctuation-free, diacritic-folded words.
+    ///
+    /// This used to fold nothing but case, on the reasoning that a comparison between two renderings
+    /// of one utterance needs no more than that. A real dictation disproved it: the raw transcript
+    /// had "hala", the cleanup model wrote the correct "hâlâ", and the guard rejected the entire
+    /// cleanup as an introduced word over two circumflexes. Adding a Turkish diacritic is precisely
+    /// the kind of orthographic repair the cleanup prompt asks for, so it must compare equal.
+    ///
+    /// `TurkishFolding.normalise` is reused rather than reimplemented; it also folds `ı` to `i`,
+    /// which is a deliberate accept: a cleanup that swapped those two has made a typo, not a
+    /// paraphrase, and this check exists for paraphrase.
     private static func stems(of text: String) -> [String] {
-        text.lowercased()
+        TurkishFolding.normalise(text)
             .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
             .map(String.init)
     }
@@ -223,9 +234,11 @@ public enum ParaphraseGuard {
     /// and the wrong fix: it would exempt every three-letter Turkish content word, including "kar",
     /// "yol" and "göz", and a content word swapped for another is exactly the substitution this
     /// check exists to catch.
-    private static let turkishFunctionWords: Set<String> = [
-        "ile", "ise", "için", "gibi", "kadar",
-    ]
+    /// Folded on construction, because `stems(of:)` folds too and an unfolded entry would never match:
+    /// "için" reaches the comparison as "icin". Written in real Turkish here so the list stays readable.
+    private static let turkishFunctionWords: Set<String> = Set(
+        ["ile", "ise", "için", "gibi", "kadar"].map(TurkishFolding.normalise)
+    )
 
     /// Words shorter than this are exempt from the introduced-word check: they carry too little
     /// meaning to be a paraphrase and they collide with longer words by chance.
