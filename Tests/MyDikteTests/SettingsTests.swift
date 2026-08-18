@@ -42,9 +42,10 @@ struct SettingsPersistenceTests {
     @Test("Settings round-trips through JSON with every field preserved")
     func jsonRoundTripPreservesEveryField() throws {
         let settings = Settings(
-            pushToTalkChord: Settings.KeyChord(modifierFlags: 0x0008_0000),
-            toggleShortcut: Settings.KeyChord(modifierFlags: 0x0008_0000, keyCode: 49),
-            cancelShortcut: Settings.KeyChord(modifierFlags: 0x0004_0000, keyCode: 53),
+            pushToTalkChord: Settings.KeyChord(modifierKeys: ["rightOption", "rightCommand"]),
+            toggleShortcut: Settings.KeyChord(modifierKeys: ["leftControl", "leftOption"], keyCode: 49),
+            cancelShortcut: Settings.KeyChord(modifierKeys: ["leftControl"], keyCode: 53),
+            promptToggleShortcut: Settings.KeyChord(modifierKeys: ["leftControl", "leftShift"], keyCode: 35),
             glossaryTerms: ["PyQt", "cache invalidation"],
             transcriptionProvider: .openRouter,
             transcriptionModelId: "whisper-large-v3",
@@ -63,6 +64,41 @@ struct SettingsPersistenceTests {
         #expect(decoded == settings)
         #expect(decoded.retainAudio == false)
         #expect(decoded.audioCuesEnabled == false)
+        #expect(decoded.promptToggleShortcut == settings.promptToggleShortcut)
+    }
+
+    /// The push-to-talk gesture is an ordered pair of physical keys, so both the order and the side
+    /// have to survive the file. A modifier bitmask expressed neither, which is why a recorded chord
+    /// could not be persisted at all before this shape.
+    @Test("a chord's order and its side both survive JSON")
+    func chordOrderAndSideSurviveJSON() throws {
+        let forward = Settings.KeyChord(modifierKeys: ["rightOption", "rightCommand"])
+        let reversed = Settings.KeyChord(modifierKeys: ["rightCommand", "rightOption"])
+        let otherSide = Settings.KeyChord(modifierKeys: ["leftOption", "rightCommand"])
+
+        let decoded = try JSONDecoder().decode(Settings.KeyChord.self, from: JSONEncoder().encode(forward))
+
+        #expect(decoded == forward)
+        #expect(decoded.modifierKeys == ["rightOption", "rightCommand"])
+        #expect(decoded != reversed)
+        #expect(decoded != otherSide)
+    }
+
+    @Test("a modifier-plus-key chord survives JSON with its key code")
+    func keyedChordSurvivesJSON() throws {
+        let chord = Settings.KeyChord(modifierKeys: ["leftControl", "leftOption"], keyCode: 49)
+        let decoded = try JSONDecoder().decode(Settings.KeyChord.self, from: JSONEncoder().encode(chord))
+
+        #expect(decoded == chord)
+        #expect(decoded.keyCode == 49)
+    }
+
+    @Test("default settings store no shortcut at all, so the Hotkeys defaults own them")
+    func defaultsStoreNoShortcut() {
+        #expect(Settings.default.pushToTalkChord == Settings.KeyChord.unset)
+        #expect(Settings.default.toggleShortcut.isEmpty)
+        #expect(Settings.default.cancelShortcut.isEmpty)
+        #expect(Settings.default.promptToggleShortcut == Settings.KeyChord.unset)
     }
 
     @Test("default settings have retainAudio and audioCuesEnabled both true")
@@ -120,5 +156,42 @@ struct SettingsPersistenceTests {
     private static func makeScratchDirectory() -> URL {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("MyDikteSettingsTests-\(UUID().uuidString)", isDirectory: true)
+    }
+}
+
+/// The Keys pane writes the cleanup key to whichever account the pipeline will read it from, and
+/// that account depends on the configured endpoint. Before this, the pane stored under a fixed
+/// `"cleanup"` account no client ever read, so a key typed into the app's own UI was invisible to
+/// the pipeline. The mapping is not restated here: it is asserted through the pipeline's own
+/// resolver, which is the single source of truth the pane also calls.
+@Suite("Cleanup key account derivation")
+struct CleanupKeyAccountTests {
+    @Test("the untouched default endpoint derives the Groq account, as the pipeline resolves it")
+    func defaultEndpointDerivesGroqAccount() {
+        let account: String = PipelineConfiguration(settings: .default).chatKeychainAccount(for: .dictate)
+
+        #expect(account == "cleanup-groq")
+    }
+
+    @Test("an OpenRouter endpoint derives the OpenRouter account")
+    func openRouterEndpointDerivesOpenRouterAccount() {
+        var settings = Settings.default
+        settings.cleanupEndpoint = "https://openrouter.ai/api/v1/chat/completions"
+
+        let account: String = PipelineConfiguration(settings: settings).chatKeychainAccount(for: .dictate)
+
+        #expect(account == "cleanup-openrouter")
+    }
+
+    @Test("the derived account is the one the pipeline reads for the same settings")
+    func derivedAccountMatchesTheConsumer() {
+        var settings = Settings.default
+        settings.cleanupEndpoint = "https://openrouter.ai/api/v1/chat/completions"
+        let configuration = PipelineConfiguration(settings: settings)
+
+        #expect(
+            configuration.chatKeychainAccount(for: .dictate)
+                == PipelineConfiguration.chatKeychainAccount(forEndpoint: configuration.chatEndpoint(for: .dictate))
+        )
     }
 }

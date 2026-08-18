@@ -1,22 +1,40 @@
 import Foundation
 
-/// The single owner of every user-facing toggle in this plan: the field list is closed and
-/// complete here, and no later step grows it, because `Store/Settings.swift` appears in no other
-/// step's `Files` list. Persists as JSON to
+/// The single owner of every user-facing toggle in this plan. The field list was closed after the
+/// original steps shipped, and stayed closed until Mode 2's prompt-toggle shortcut turned out to be
+/// the one shortcut belonging to the feature the user cares most about that they could not
+/// reconfigure: `promptToggleShortcut` reopened it deliberately, for that reason alone, and it stays
+/// closed again afterward. Persists as JSON to
 /// `~/Library/Application Support/MyDikte/settings.json` with `0600` permissions. API keys never
 /// live in this file; they go through `KeychainStore` instead.
 struct Settings: Codable, Equatable {
-    /// A keyboard shortcut expressed as a modifier mask plus an optional key code, so a
-    /// modifier-only chord (push-to-talk) and a modifier-plus-key chord (toggle, cancel) share
-    /// one representation without depending on the `Hotkeys` area, which this step does not
-    /// touch and which has not landed yet in this wave.
+    /// A keyboard shortcut expressed in primitives only, so a modifier-only chord (push-to-talk)
+    /// and a modifier-plus-key chord (toggle, cancel) share one representation and this file still
+    /// depends on no other area. `Hotkeys/ShortcutBinding.swift` owns every mapping from these
+    /// primitives onto the types that actually register a shortcut.
+    ///
+    /// `modifierKeys` is **ordered** and names **physical** keys (`ShortcutCoordinator.ModifierKey`
+    /// raw values, for example `"rightOption"`), because push-to-talk is an ordered pair of
+    /// side-specific keys: right Option then right Command is a different gesture from right Command
+    /// then right Option, and left Option is a different key from right Option. A modifier bitmask
+    /// expressed neither, so a recorded chord could not round-trip through the file at all.
     struct KeyChord: Codable, Equatable {
-        let modifierFlags: UInt
+        let modifierKeys: [String]
         let keyCode: UInt16?
 
-        init(modifierFlags: UInt, keyCode: UInt16? = nil) {
-            self.modifierFlags = modifierFlags
+        init(modifierKeys: [String], keyCode: UInt16? = nil) {
+            self.modifierKeys = modifierKeys
             self.keyCode = keyCode
+        }
+
+        /// No shortcut recorded, which resolves to the `Hotkeys` default rather than to nothing.
+        static let unset = KeyChord(modifierKeys: [])
+
+        /// A chord with no modifier is not a shortcut this app registers: the push-to-talk gesture
+        /// is modifiers only, and a global hot key with no modifier would take a bare key away from
+        /// every app in the session.
+        var isEmpty: Bool {
+            modifierKeys.isEmpty
         }
     }
 
@@ -44,6 +62,7 @@ struct Settings: Codable, Equatable {
     var pushToTalkChord: KeyChord
     var toggleShortcut: KeyChord
     var cancelShortcut: KeyChord
+    var promptToggleShortcut: KeyChord
     var glossaryTerms: [String]
     var transcriptionProvider: TranscriptionProvider
     var transcriptionModelId: String
@@ -55,14 +74,11 @@ struct Settings: Codable, Equatable {
     var retainAudio: Bool
     var audioCuesEnabled: Bool
 
-    /// The `KeychainStore` account for the Step 13 cleanup and rewrite client, per the Wave 1
-    /// amendment.
-    static let cleanupKeychainAccount = "cleanup"
-
     static let `default` = Settings(
-        pushToTalkChord: KeyChord(modifierFlags: 0),
-        toggleShortcut: KeyChord(modifierFlags: 0),
-        cancelShortcut: KeyChord(modifierFlags: 0),
+        pushToTalkChord: .unset,
+        toggleShortcut: .unset,
+        cancelShortcut: .unset,
+        promptToggleShortcut: .unset,
         glossaryTerms: [],
         transcriptionProvider: .groq,
         transcriptionModelId: "",

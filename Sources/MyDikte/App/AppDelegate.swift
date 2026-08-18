@@ -97,12 +97,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Connects the two halves of Wave 2 that were deliberately left unconnected: the chord's four
     /// events map onto the audio engine's warm-up, keep, cancel and stop.
+    /// The configuration is built here from the persisted settings, because this is the only place
+    /// that owns both halves. Without it the coordinator ran on its own compiled-in defaults and every
+    /// shortcut the user recorded in the Settings window was written to disk and then ignored.
+    ///
+    /// Read once at launch, like the rest of the shortcut layer: changing a shortcut needs a relaunch,
+    /// since re-registering Carbon hot keys and the tap under a live push-to-talk gesture is a
+    /// different piece of work.
     private func setUpShortcuts() {
-        let coordinator = ShortcutCoordinator { [weak self] event in
+        let configuration: ShortcutCoordinator.Configuration = ShortcutBinding.configuration(from: Settings.load())
+        logger.notice("shortcut configuration: \(Self.describe(configuration), privacy: .public)")
+
+        let coordinator = ShortcutCoordinator(configuration: configuration) { [weak self] event in
             self?.handle(event)
         }
         shortcuts = coordinator
         startShortcuts()
+    }
+
+    /// What the coordinator was actually handed, so hands-on QA can read from the log whether a
+    /// persisted binding won or a default did.
+    private static func describe(_ configuration: ShortcutCoordinator.Configuration) -> String {
+        let keyed: [(String, CarbonHotkey.Binding)] = [
+            ("toggle", configuration.toggle),
+            ("cancel", configuration.cancel),
+            ("promptToggle", configuration.promptToggle),
+        ]
+        let keyedText: String = keyed
+            .map { "\($0.0) keyCode \($0.1.keyCode) modifiers 0x\(String($0.1.modifiers, radix: 16))" }
+            .joined(separator: ", ")
+
+        return "chord \(configuration.chord.first.rawValue) then \(configuration.chord.second.rawValue), \(keyedText)"
     }
 
     private func handle(_ event: ShortcutCoordinator.Event) {
