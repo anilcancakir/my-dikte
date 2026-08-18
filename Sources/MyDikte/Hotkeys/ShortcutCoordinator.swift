@@ -184,33 +184,47 @@ final class ShortcutCoordinator: @unchecked Sendable {
         /// Namespace for the default keyed bindings, kept out of `CarbonHotkey` so that type stays a
         /// plain registration wrapper.
         enum Binding {
-            /// All three carry Command on top of Control and Option, and the reason is measured
-            /// rather than cautious: Control-Option-D and Control-Option-C, the previous defaults,
-            /// both collide with Magnet, which was running on this machine and owns
-            /// Control-Option-D, F and G for window thirds and Control-Option-C for centring. A
-            /// global hot key wins over an application's own, so the previous defaults silently took
-            /// two window commands away, and pressing the toggle moved the window instead of
-            /// starting a dictation.
+            /// The three keyed shortcuts are deliberately not uniform, because they are not pressed
+            /// with the same frequency and a shortcut's cost should match how often it is used.
             ///
-            /// Adding Command is what buys the room. Window managers and editors spend
-            /// Control-Option heavily and almost nothing claims Control-Option-Command, and the
-            /// three modifiers sit next to each other on the left of the keyboard, so the grip is one
-            /// hand. Carbon registration cannot be used to check any of this: registering
-            /// Command-Space, which Spotlight owns, succeeds, so a successful registration says
-            /// nothing about whether the key will actually arrive.
+            /// What ruled out the obvious choices: Control-Option-D and Control-Option-C, the first
+            /// defaults here, both collide with Magnet, which runs on this machine and owns
+            /// Control-Option-D, F and G for window thirds and Control-Option-C for centring. A
+            /// global hot key wins over an application's own, so those defaults moved a window
+            /// instead of starting a dictation and quietly took two window commands away. Carbon
+            /// registration cannot detect any of this: registering Command-Space, which Spotlight
+            /// owns, succeeds, so a successful registration proves nothing about whether the key will
+            /// arrive.
+            ///
+            /// The toggle is the shortcut this app is mostly driven by, so it is two modifiers and one
+            /// letter, chosen by the user.
+            ///
+            /// Option-Shift rather than Command-Shift, and the difference is not cosmetic.
+            /// Command-Shift-T is "reopen the last closed tab" in every browser and "reopen the closed
+            /// editor" in VS Code, and a global hot key wins over an application's own, so binding it
+            /// would take all of those away. Applications almost never bind Option-Shift, so what a
+            /// global one costs instead is the character that combination types. Measured on this
+            /// machine's active layout with `UCKeyTranslate`: Option-Shift-T types `ˇ`, a caron dead
+            /// key, and Option-Shift-Y types `Á`, neither of which occurs in Turkish or in this user's
+            /// English. That is the whole price.
             static let defaultToggle = CarbonHotkey.Binding(
-                keyCode: UInt32(kVK_ANSI_D),
-                modifiers: UInt32(controlKey | optionKey | cmdKey)
+                keyCode: UInt32(kVK_ANSI_T),
+                modifiers: UInt32(optionKey | shiftKey)
             )
-            /// Escape is deliberately not used for cancel: a global Escape hot key would take the
-            /// key away from every application in the session.
+            /// Mode 2 is frequent enough to stay as cheap as the toggle. Y rather than P because
+            /// Option-Shift-P types `∏` while Option-Shift-Y types `Á`, and neither key is otherwise
+            /// spoken for; Y also keeps Mode 2 next to the toggle under the same two modifiers.
+            static let defaultPromptToggle = CarbonHotkey.Binding(
+                keyCode: UInt32(kVK_ANSI_Y),
+                modifiers: UInt32(optionKey | shiftKey)
+            )
+            /// Cancel keeps three modifiers on purpose, and it is the one place where an awkward grip
+            /// is the right answer: it is pressed rarely, and hitting it by accident throws away a
+            /// dictation that has already been spoken. Escape would be the natural key and is
+            /// deliberately not used, because a global Escape hot key would take the key away from
+            /// every application in the session.
             static let defaultCancel = CarbonHotkey.Binding(
                 keyCode: UInt32(kVK_ANSI_C),
-                modifiers: UInt32(controlKey | optionKey | cmdKey)
-            )
-            /// P for "prompt": Mode 2, the dictation that becomes an English prompt.
-            static let defaultPromptToggle = CarbonHotkey.Binding(
-                keyCode: UInt32(kVK_ANSI_P),
                 modifiers: UInt32(controlKey | optionKey | cmdKey)
             )
         }
