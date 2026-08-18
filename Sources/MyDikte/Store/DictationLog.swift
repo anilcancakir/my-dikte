@@ -56,6 +56,15 @@ struct DictationRecord: Codable, Equatable {
     /// otherwise. Presence of a reason is how a reader tells rejected from accepted, rather than a
     /// separate boolean that could disagree with it.
     let paraphraseRejectionReason: String?
+    /// The cleanup the paraphrase guard turned down, when it turned one down. `nil` both when
+    /// nothing was rejected and when the cleanup call itself failed, since there was no candidate.
+    ///
+    /// It is here for the same reason `rawTranscript` is: a reason string quotes word counts and
+    /// cannot say whether the guard was right. A measured four-out-of-four rejection turned out to
+    /// be the guard refusing the exact glossary repair the cleanup prompt asks for, and that stayed
+    /// invisible for a whole wave because the candidate was discarded at the moment it was judged.
+    /// Tuning the guard's thresholds against real dictations is only possible if this survives.
+    let rejectedCleanup: String?
     let transcriptionModelId: String
     let cleanupModelId: String
     let timings: Timings
@@ -68,6 +77,7 @@ struct DictationRecord: Codable, Equatable {
         rawTranscript: String,
         finalText: String,
         paraphraseRejectionReason: String?,
+        rejectedCleanup: String?,
         transcriptionModelId: String,
         cleanupModelId: String,
         timings: Timings
@@ -79,6 +89,7 @@ struct DictationRecord: Codable, Equatable {
         self.rawTranscript = rawTranscript
         self.finalText = finalText
         self.paraphraseRejectionReason = paraphraseRejectionReason
+        self.rejectedCleanup = rejectedCleanup
         self.transcriptionModelId = transcriptionModelId
         self.cleanupModelId = cleanupModelId
         self.timings = timings

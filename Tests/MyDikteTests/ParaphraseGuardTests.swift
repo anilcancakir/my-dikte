@@ -132,4 +132,69 @@ struct ParaphraseGuardTests {
         )
         #expect(result == .accept)
     }
+
+    /// The measured case, verbatim from `evidence/step-06-guard-live-matrix.txt`: with the glossary
+    /// configured, the default cleanup model repaired "pikutiyle" into "PyQt ile" on four runs out
+    /// of four, and the guard rejected all four on the introduced-word check. The repair is the
+    /// single measured accuracy win the glossary exists for, so rejecting it made the guard reject
+    /// the behaviour the cleanup prompt explicitly asks for.
+    @Test("the measured glossary repair that splits a Turkish postposition off is accepted")
+    func measuredGlossaryRepairSplittingAPostpositionIsAccepted() {
+        let result = ParaphraseGuard.check(
+            raw: "Iıı bugün şey kubernetes üzerinde çalışan servisleri güncelledim yani sonra "
+                + "grafana da bir panel açtım hani ve pikutiyle arayüzü şey bitirdim işte.",
+            cleaned: "Bugün Kubernetes üzerinde çalışan servisleri güncelledim, sonra Grafana'da "
+                + "bir panel açtım ve PyQt ile arayüzü bitirdim.",
+            glossary: ["Kubernetes", "Grafana", "PyQt", "Redis", "staging"]
+        )
+        #expect(result == .accept)
+    }
+
+    /// Every member of the exemption list, one at a time, separated out of a sentence that does not
+    /// contain it in any form. The fixture is a full dictation rather than a two-word fragment on
+    /// purpose: at a one-third tolerance a two-word utterance cannot gain a word at all, so a short
+    /// fixture tests the growth check instead of the check under test.
+    @Test(
+        "each Turkish clitic and postposition the cleanup can separate out is exempt",
+        arguments: ["ile", "ise", "için", "gibi", "kadar"]
+    )
+    func separatedFunctionWordIsAccepted(functionWord: String) {
+        let raw = "bugün toplantı vardı ve notları aldım sonra ofisten çıktım"
+        let cleaned = "Bugün toplantı vardı ve notları aldım, sonra \(functionWord) ofisten çıktım."
+
+        let result = ParaphraseGuard.check(raw: raw, cleaned: cleaned, glossary: [])
+        #expect(result == .accept, "\"\(functionWord)\" should not read as an introduced word")
+    }
+
+    /// The natural shape of the measured failure, at dictation length: a run-together form that
+    /// cleanup separates into a word plus its postposition, where the postposition is not a
+    /// substring of the raw word and so the substring rule cannot account for it.
+    @Test("a run-together form separated into a word plus its postposition is accepted")
+    func separatedPostpositionFromRunTogetherFormIsAccepted() {
+        let result = ParaphraseGuard.check(
+            raw: "dün akşam toplantıya onunla gittim ve bütün notları aldım",
+            cleaned: "Dün akşam toplantıya onun ile gittim ve bütün notları aldım.",
+            glossary: []
+        )
+        #expect(result == .accept)
+    }
+
+    /// The exemption is a closed list of function words and must not become a general amnesty for
+    /// short words: a three-letter Turkish content word swapped in is exactly the substitution the
+    /// introduced-word check exists to catch, which is why the fix is a list and not a raised
+    /// length threshold.
+    @Test(
+        "a three-letter Turkish content word substituted in is still rejected",
+        arguments: [
+            ("evde kar yağıyordu", "evde yol yağıyordu"),
+            ("gözüme bir şey kaçtı", "kulağıma bir şey kaçtı"),
+        ]
+    )
+    func shortContentWordSubstitutionIsRejected(raw: String, cleaned: String) {
+        let result = ParaphraseGuard.check(raw: raw, cleaned: cleaned, glossary: [])
+        guard case .reject = result else {
+            Issue.record("expected .reject, got \(result)")
+            return
+        }
+    }
 }

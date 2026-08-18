@@ -94,6 +94,7 @@ struct HistoryEntryListTests {
             rawTranscript: rawTranscript,
             finalText: finalText,
             paraphraseRejectionReason: nil,
+            rejectedCleanup: nil,
             transcriptionModelId: "whisper-large-v3",
             cleanupModelId: "gpt-oss-120b",
             timings: DictationRecord.Timings(

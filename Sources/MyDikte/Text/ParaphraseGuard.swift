@@ -97,6 +97,15 @@ public enum ParaphraseGuard {
     /// merged back together ("kuber netis" to "Kubernetes") all contain or are contained by a raw
     /// word. A glossary term is allowed outright, because the cleanup prompt is explicitly asked
     /// to repair misheard technical terms into their configured spelling.
+    ///
+    /// The substring rule alone is not enough, and the gap was measured rather than guessed. With
+    /// the glossary configured, the default model repaired "pikutiyle" into "PyQt ile" on four runs
+    /// out of four, and this check rejected all four on the word "ile": three characters, so not
+    /// under the length exemption, and not a substring of "pikutiyle" either, because a 'y' sits
+    /// between the 'i' and the 'l'. The glossary licensed "PyQt" and nothing licensed the
+    /// postposition the repair separated out, so the guard rejected the single measured accuracy win
+    /// the glossary exists for, every time. Full matrix in
+    /// `.ac/plans/my-dikte-swift-macos/evidence/step-06-guard-live-matrix.txt`.
     private static func introducedWord(raw: String, cleaned: String, glossary: [String]) -> String? {
         let rawStems: [String] = stems(of: raw)
         let glossaryStems: [String] = glossary.flatMap { stems(of: $0) }
@@ -104,6 +113,9 @@ public enum ParaphraseGuard {
         for word in stems(of: cleaned) {
             // Too short to carry a paraphrase, and short strings match everything by accident.
             if word.count < minimumComparableLength {
+                continue
+            }
+            if turkishFunctionWords.contains(word) {
                 continue
             }
             if glossaryStems.contains(where: { $0.contains(word) || word.contains($0) }) {
@@ -161,6 +173,19 @@ public enum ParaphraseGuard {
             .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
             .map(String.init)
     }
+
+    /// Turkish clitics and postpositions that speech runs together with the preceding word and
+    /// writing separates, so cleanup legitimately splits one off without inventing anything.
+    ///
+    /// Deliberately closed and short. The shorter members of this class ("de", "da", "ki", "mi",
+    /// "mı", "mu", "mü", "ve") already fall under `minimumComparableLength`, so only these five
+    /// need naming. Raising that length threshold to four instead would have been the smaller diff
+    /// and the wrong fix: it would exempt every three-letter Turkish content word, including "kar",
+    /// "yol" and "göz", and a content word swapped for another is exactly the substitution this
+    /// check exists to catch.
+    private static let turkishFunctionWords: Set<String> = [
+        "ile", "ise", "için", "gibi", "kadar",
+    ]
 
     /// Words shorter than this are exempt from the introduced-word check: they carry too little
     /// meaning to be a paraphrase and they collide with longer words by chance.

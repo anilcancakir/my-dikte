@@ -51,6 +51,41 @@ struct DictationLogTests {
         #expect(decoded[0].audioPath == nil)
     }
 
+    /// The reason string quotes word counts and cannot say whether the guard was right, so the
+    /// candidate it turned down has to survive the round trip: without it, tuning the guard against
+    /// real dictations is impossible, which is exactly how a wrong diagnosis survived a whole wave.
+    @Test("a rejected cleanup candidate survives the round trip alongside its reason")
+    func rejectedCleanupCandidateRoundTrips() throws {
+        let directory = Self.makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try DictationLog.append(
+            Self.makeRecord(
+                rawTranscript: "ham metin",
+                finalText: "ham metin",
+                paraphraseRejectionReason: "Raw transcript inserted instead: 22 words became 14.",
+                rejectedCleanup: "Temizlenmiş metin."
+            ),
+            to: directory
+        )
+
+        let decoded = try Self.decodeLines(from: directory)
+        #expect(decoded.count == 1)
+        #expect(decoded[0].rejectedCleanup == "Temizlenmiş metin.")
+        #expect(decoded[0].paraphraseRejectionReason?.contains("22 words became 14") == true)
+    }
+
+    @Test("an accepted cleanup writes no rejected candidate")
+    func acceptedCleanupWritesNoRejectedCandidate() throws {
+        let directory = Self.makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try DictationLog.append(Self.makeRecord(), to: directory)
+
+        let decoded = try Self.decodeLines(from: directory)
+        #expect(decoded[0].rejectedCleanup == nil)
+    }
+
     @Test("the directory is created on first append with mode 0700")
     func directoryIsCreatedOnFirstAppendWithMode0700() throws {
         let directory = Self.makeScratchDirectory()
@@ -117,7 +152,9 @@ struct DictationLogTests {
     private static func makeRecord(
         rawTranscript: String = "ham metin",
         finalText: String = "Ham metin.",
-        audioPath: URL? = URL(fileURLWithPath: "/tmp/does-not-need-to-exist.m4a")
+        audioPath: URL? = URL(fileURLWithPath: "/tmp/does-not-need-to-exist.m4a"),
+        paraphraseRejectionReason: String? = nil,
+        rejectedCleanup: String? = nil
     ) -> DictationRecord {
         DictationRecord(
             timestamp: Date(timeIntervalSince1970: 1_700_000_000),
@@ -126,7 +163,8 @@ struct DictationLogTests {
             duration: 3.4,
             rawTranscript: rawTranscript,
             finalText: finalText,
-            paraphraseRejectionReason: nil,
+            paraphraseRejectionReason: paraphraseRejectionReason,
+            rejectedCleanup: rejectedCleanup,
             transcriptionModelId: "whisper-large-v3",
             cleanupModelId: "gpt-oss-120b",
             timings: DictationRecord.Timings(

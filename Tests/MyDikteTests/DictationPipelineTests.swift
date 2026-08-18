@@ -197,6 +197,46 @@ struct InsertionChoiceTests {
         #expect(choice.text == "Move the meeting to Thursday and confirm the attendees.")
         #expect(choice.rejectionReason == nil)
     }
+
+    /// A rejection reason quotes two word counts and nothing else, so without the candidate itself
+    /// there is no way to tell a guard that is too strict from a model that is paraphrasing. That
+    /// ambiguity let a wrong diagnosis survive a whole wave and four user-visible rejections, which
+    /// is why the candidate is kept rather than discarded.
+    @Test("a paraphrase rejection keeps the cleanup it rejected, so the guard can be tuned later")
+    func guardRejectionKeepsTheRejectedCleanup() {
+        let choice = InsertionChoice.resolve(
+            raw: "Kubernetes üzerinde çalışan servisleri güncelledim",
+            cleanup: .cleaned("Servisleri güncelledim."),
+            glossary: ["Kubernetes"],
+            applyingParaphraseGuard: true
+        )
+
+        #expect(choice.rejectedCleanup == "Servisleri güncelledim.")
+    }
+
+    @Test("a cleanup failure has no candidate to keep, so it reports none")
+    func cleanupFailureHasNoRejectedCandidate() {
+        let choice = InsertionChoice.resolve(
+            raw: "bugün servisleri güncelledim",
+            cleanup: .failed(reason: "HTTP 401: invalid api key"),
+            glossary: [],
+            applyingParaphraseGuard: true
+        )
+
+        #expect(choice.rejectedCleanup == nil)
+    }
+
+    @Test("an accepted cleanup reports no rejected candidate")
+    func acceptedCleanupHasNoRejectedCandidate() {
+        let choice = InsertionChoice.resolve(
+            raw: "ıı bugün şey servisleri güncelledim yani",
+            cleanup: .cleaned("Bugün servisleri güncelledim."),
+            glossary: [],
+            applyingParaphraseGuard: true
+        )
+
+        #expect(choice.rejectedCleanup == nil)
+    }
 }
 
 @Suite("PipelineConfiguration")

@@ -116,7 +116,10 @@ enum CleanupOutcome: Sendable, Equatable {
 /// the pipeline's control flow, so they can be asserted without a network.
 enum InsertionChoice: Sendable, Equatable {
     case cleaned(String)
-    case raw(text: String, reason: String)
+    /// - Parameter rejectedCleanup: the candidate the paraphrase guard turned down, kept so the
+    ///   guard's own thresholds can be judged later against real dictations. `nil` when there was
+    ///   never a candidate, which is the cleanup-failed case.
+    case raw(text: String, reason: String, rejectedCleanup: String?)
 
     /// - Parameter applyingParaphraseGuard: false for the Mode 2 rewrite. The guard compares a
     ///   cleanup against the words it was given, and an English prompt rewritten from Turkish
@@ -130,7 +133,11 @@ enum InsertionChoice: Sendable, Equatable {
     ) -> InsertionChoice {
         switch cleanup {
         case .failed(let reason):
-            return .raw(text: raw, reason: "Cleanup failed, so the raw transcript went in: \(reason)")
+            return .raw(
+                text: raw,
+                reason: "Cleanup failed, so the raw transcript went in: \(reason)",
+                rejectedCleanup: nil
+            )
 
         case .cleaned(let cleaned):
             guard applyingParaphraseGuard else {
@@ -140,7 +147,11 @@ enum InsertionChoice: Sendable, Equatable {
             case .accept:
                 return .cleaned(cleaned)
             case .reject(let reason):
-                return .raw(text: raw, reason: "Raw transcript inserted instead: \(reason)")
+                return .raw(
+                    text: raw,
+                    reason: "Raw transcript inserted instead: \(reason)",
+                    rejectedCleanup: cleaned
+                )
             }
         }
     }
@@ -149,7 +160,7 @@ enum InsertionChoice: Sendable, Equatable {
         switch self {
         case .cleaned(let text):
             return text
-        case .raw(let text, _):
+        case .raw(let text, _, _):
             return text
         }
     }
@@ -160,8 +171,25 @@ enum InsertionChoice: Sendable, Equatable {
         switch self {
         case .cleaned:
             return nil
-        case .raw(_, let reason):
+        case .raw(_, let reason, _):
             return reason
+        }
+    }
+
+    /// The cleanup the paraphrase guard turned down, or `nil` when nothing was turned down.
+    ///
+    /// This is the artefact behind the reason string. The reason quotes word counts, which is enough
+    /// to know that the guard fired and not enough to know whether it should have: a measured
+    /// four-out-of-four rejection turned out to be the guard refusing the exact glossary repair the
+    /// cleanup prompt asks for, and that was invisible from the log until the candidate was kept.
+    /// Same argument the plan makes for keeping the raw transcript rather than collapsing the two
+    /// API calls into one: keep the artefact, or the failure is undetectable by construction.
+    var rejectedCleanup: String? {
+        switch self {
+        case .cleaned:
+            return nil
+        case .raw(_, _, let rejectedCleanup):
+            return rejectedCleanup
         }
     }
 }
@@ -481,6 +509,7 @@ final class DictationPipeline {
                 rawTranscript: raw,
                 finalText: choice.text,
                 reason: choice.rejectionReason,
+                rejectedCleanup: choice.rejectedCleanup,
                 timings: timings.record(totalSeconds: Self.elapsed(since: releasedAt)),
                 configuration: configuration
             )
@@ -649,6 +678,7 @@ final class DictationPipeline {
         rawTranscript: String,
         finalText: String,
         reason: String?,
+        rejectedCleanup: String? = nil,
         timings: DictationRecord.Timings,
         configuration: PipelineConfiguration
     ) {
@@ -663,6 +693,7 @@ final class DictationPipeline {
             // failure or a discard reason, all of which answer the same question an offline reader
             // asks: why is `finalText` not the cleaned transcript.
             paraphraseRejectionReason: reason,
+            rejectedCleanup: rejectedCleanup,
             transcriptionModelId: configuration.transcriptionModelId,
             cleanupModelId: configuration.cleanupModelId,
             timings: timings
