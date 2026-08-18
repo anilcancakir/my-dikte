@@ -57,7 +57,8 @@ struct SettingsPersistenceTests {
             retainAudio: false,
             audioCuesEnabled: false,
             livePreviewEnabled: false,
-            advisoryParaphraseGuard: false
+            advisoryParaphraseGuard: false,
+            stopOnReturnOrSpace: false
         )
 
         let data = try JSONEncoder().encode(settings)
@@ -68,7 +69,16 @@ struct SettingsPersistenceTests {
         #expect(decoded.audioCuesEnabled == false)
         #expect(decoded.livePreviewEnabled == false)
         #expect(decoded.advisoryParaphraseGuard == false)
+        #expect(decoded.stopOnReturnOrSpace == false)
         #expect(decoded.promptToggleShortcut == settings.promptToggleShortcut)
+    }
+
+    /// On unless it is turned off: reaching back for a two-modifier chord to stop a recording is the
+    /// awkwardness this exists to remove, and the keys are only watched while a recording is in
+    /// flight, so the cost of leaving it on is bounded by the length of a dictation.
+    @Test("ending a recording with Return or Space defaults to on")
+    func stopKeysDefaultToOn() {
+        #expect(Settings.default.stopOnReturnOrSpace == true)
     }
 
     /// The guard is advisory unless it is turned off, because the measurement says so: over one day of
@@ -78,11 +88,11 @@ struct SettingsPersistenceTests {
         #expect(Settings.default.advisoryParaphraseGuard == true)
     }
 
-    /// A settings file written before this field existed must keep everything else it holds. A strict
+    /// A settings file written before a field existed must keep everything else it holds. A strict
     /// decode would throw, `load` would fall back to defaults, and the user's measured six-term
     /// glossary would silently become an empty one, which is a worse dictation rather than a reset
-    /// toggle. Only this one key is treated as optional: it is the only key an existing file can be
-    /// missing.
+    /// toggle. Only the fields added after the file shape was first written are optional:
+    /// `advisoryParaphraseGuard` and `stopOnReturnOrSpace`.
     @Test("a settings file written before the advisory field keeps its glossary and gains the default")
     func olderSettingsFileKeepsItsGlossary() throws {
         let directory: URL = Self.makeScratchDirectory()
@@ -103,6 +113,7 @@ struct SettingsPersistenceTests {
         #expect(loaded.glossaryTerms.count == 6)
         #expect(loaded.glossaryTerms.contains("PyQt"))
         #expect(loaded.advisoryParaphraseGuard == true)
+        #expect(loaded.stopOnReturnOrSpace == true)
     }
 
     /// The push-to-talk gesture is an ordered pair of physical keys, so both the order and the side

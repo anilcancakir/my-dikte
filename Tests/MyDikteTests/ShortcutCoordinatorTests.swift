@@ -1,3 +1,4 @@
+import Carbon.HIToolbox
 import CoreGraphics
 import Foundation
 import Testing
@@ -245,5 +246,130 @@ struct ShortcutCoordinatorTests {
             return
         }
         _ = machine.handle(.minimumHoldElapsed(generation: generation))
+    }
+}
+
+/// The bare-key stop gesture: while a latched recording is in flight, Return and Space end it and do
+/// not reach the focused application, and at every other moment both keys are untouched.
+///
+/// Pure, exactly like `ChordMachine`, so the decision is asserted here while the tap that feeds it is
+/// verified by hand inside the signed bundle. That split matters more here than for the chord: this
+/// gesture needs `keyDown`, which is the event secure input takes away from a tap, so a test can only
+/// ever prove the decision and never the delivery.
+@Suite("Stop keys")
+struct StopKeyMachineTests {
+    private typealias Machine = ShortcutCoordinator.StopKeyMachine
+
+    private static let returnKey = Int64(kVK_Return)
+    private static let spaceKey = Int64(kVK_Space)
+    private static let letterA = Int64(kVK_ANSI_A)
+
+    /// What a real bare press carries: `maskNonCoalesced`, which macOS sets on nearly every event it
+    /// delivers and which says nothing about a modifier being held.
+    private static let bare = CGEventFlags(rawValue: 0x0000_0100)
+
+    private static func latched(isEnabled: Bool = true) -> Machine {
+        var machine = Machine(isEnabled: isEnabled)
+        machine.setLatchedRecording(true)
+        return machine
+    }
+
+    @Test("with no recording in flight both keys are passed through untouched")
+    func idleLeavesBothKeysAlone() {
+        var machine = Machine(isEnabled: true)
+
+        for keyCode in [Self.returnKey, Self.spaceKey] {
+            #expect(machine.handle(kind: .keyDown, keyCode: keyCode, flags: Self.bare) == .pass)
+            #expect(machine.handle(kind: .keyUp, keyCode: keyCode, flags: Self.bare) == .pass)
+        }
+    }
+
+    @Test("a latched recording is ended by Return and by Space, and neither reaches the application")
+    func latchedRecordingIsEndedByEitherKey() {
+        for keyCode in [Self.returnKey, Self.spaceKey] {
+            var machine = Self.latched()
+            #expect(machine.handle(kind: .keyDown, keyCode: keyCode, flags: Self.bare) == .stopRecording)
+        }
+    }
+
+    @Test("the matching key-up is swallowed, so the application never sees half a press")
+    func theMatchingKeyUpIsSwallowed() {
+        var machine = Self.latched()
+
+        #expect(machine.handle(kind: .keyDown, keyCode: Self.returnKey, flags: Self.bare) == .stopRecording)
+        // The recording is already stopping by now, so the latch is gone before the key comes up.
+        machine.setLatchedRecording(false)
+        #expect(machine.handle(kind: .keyUp, keyCode: Self.returnKey, flags: Self.bare) == .swallow)
+        // And once it is accounted for, a later key-up of the same key is somebody else's.
+        #expect(machine.handle(kind: .keyUp, keyCode: Self.returnKey, flags: Self.bare) == .pass)
+    }
+
+    @Test("auto-repeat is swallowed rather than stopping the recording twice")
+    func autoRepeatStopsOnlyOnce() {
+        var machine = Self.latched()
+
+        #expect(machine.handle(kind: .keyDown, keyCode: Self.spaceKey, flags: Self.bare) == .stopRecording)
+        #expect(machine.handle(kind: .keyDown, keyCode: Self.spaceKey, flags: Self.bare) == .swallow)
+        #expect(machine.handle(kind: .keyDown, keyCode: Self.spaceKey, flags: Self.bare) == .swallow)
+    }
+
+    @Test("a modified Return or Space belongs to the focused application, not to this app")
+    func modifiedPressesArePassedThrough() {
+        let modifiers: [CGEventFlags] = [.maskCommand, .maskControl, .maskAlternate, .maskShift]
+
+        for modifier in modifiers {
+            var machine = Self.latched()
+            let flags = CGEventFlags(rawValue: Self.bare.rawValue | modifier.rawValue)
+
+            #expect(machine.handle(kind: .keyDown, keyCode: Self.returnKey, flags: flags) == .pass)
+            #expect(machine.handle(kind: .keyDown, keyCode: Self.spaceKey, flags: flags) == .pass)
+        }
+    }
+
+    @Test("Caps Lock does not disqualify a press, because it changes neither key")
+    func capsLockIsIgnored() {
+        var machine = Self.latched()
+        let flags = CGEventFlags(rawValue: Self.bare.rawValue | CGEventFlags.maskAlphaShift.rawValue)
+
+        #expect(machine.handle(kind: .keyDown, keyCode: Self.returnKey, flags: flags) == .stopRecording)
+    }
+
+    @Test("turning the setting off leaves both keys alone even mid-recording")
+    func theSettingOffDisablesTheGesture() {
+        var machine = Self.latched(isEnabled: false)
+
+        #expect(machine.handle(kind: .keyDown, keyCode: Self.returnKey, flags: Self.bare) == .pass)
+        #expect(machine.handle(kind: .keyUp, keyCode: Self.returnKey, flags: Self.bare) == .pass)
+        #expect(machine.handle(kind: .keyDown, keyCode: Self.spaceKey, flags: Self.bare) == .pass)
+    }
+
+    @Test("the recording ending puts both keys back, which is the whole safety property")
+    func endingTheRecordingDisarmsTheKeys() {
+        var machine = Self.latched()
+        machine.setLatchedRecording(false)
+
+        #expect(machine.handle(kind: .keyDown, keyCode: Self.returnKey, flags: Self.bare) == .pass)
+        #expect(machine.handle(kind: .keyDown, keyCode: Self.spaceKey, flags: Self.bare) == .pass)
+    }
+
+    @Test("every other key is untouched while a recording is in flight")
+    func unrelatedKeysAreNeverTouched() {
+        var machine = Self.latched()
+
+        #expect(machine.handle(kind: .keyDown, keyCode: Self.letterA, flags: Self.bare) == .pass)
+        #expect(machine.handle(kind: .keyUp, keyCode: Self.letterA, flags: Self.bare) == .pass)
+        // The chord arrives as `flagsChanged`, which this machine has no opinion about at all.
+        #expect(machine.handle(kind: .flagsChanged, keyCode: Int64(kVK_RightOption), flags: Self.bare) == .pass)
+    }
+
+    @Test("a fresh press after the recording ended and a new one started stops the new recording")
+    func theGestureIsRepeatable() {
+        var machine = Self.latched()
+        #expect(machine.handle(kind: .keyDown, keyCode: Self.returnKey, flags: Self.bare) == .stopRecording)
+        machine.setLatchedRecording(false)
+        #expect(machine.handle(kind: .keyUp, keyCode: Self.returnKey, flags: Self.bare) == .swallow)
+
+        machine.setLatchedRecording(true)
+        #expect(machine.handle(kind: .keyDown, keyCode: Self.returnKey, flags: Self.bare) == .stopRecording)
     }
 }

@@ -3,8 +3,10 @@ import Foundation
 /// The single owner of every user-facing toggle in this plan. The field list was closed after the
 /// original steps shipped, and stayed closed until Mode 2's prompt-toggle shortcut turned out to be
 /// the one shortcut belonging to the feature the user cares most about that they could not
-/// reconfigure: `promptToggleShortcut` reopened it deliberately, for that reason alone, and it stays
-/// closed again afterward. Persists as JSON to
+/// reconfigure: `promptToggleShortcut` reopened it deliberately, for that reason alone, and it stayed
+/// closed again afterward. `stopOnReturnOrSpace` reopened it a second time on the same footing: it
+/// governs a gesture that watches two keys every application depends on, so a way to turn it off has to
+/// exist without touching code. Persists as JSON to
 /// `~/Library/Application Support/MyDikte/settings.json` with `0600` permissions. API keys never
 /// live in this file; they go through `KeychainStore` instead.
 struct Settings: Codable, Equatable {
@@ -82,6 +84,12 @@ struct Settings: Codable, Equatable {
     /// correct cleanups and caught no genuine paraphrase. Strict stays reachable, because the
     /// measurement can change and this is not a one-way door.
     var advisoryParaphraseGuard: Bool
+    /// Whether a bare Return or Space ends a recording that a keyed shortcut started. On unless it is
+    /// turned off: reaching back for a two-modifier chord to stop is the awkwardness it removes, and the
+    /// two keys are watched only while a recording is in flight, so what leaving it on costs is bounded
+    /// by the length of a dictation. `Hotkeys/ShortcutCoordinator.swift` owns the gesture and the
+    /// limitation that comes with it (secure input hides the keys from the tap).
+    var stopOnReturnOrSpace: Bool
 
     static let `default` = Settings(
         pushToTalkChord: .unset,
@@ -99,19 +107,20 @@ struct Settings: Codable, Equatable {
         retainAudio: true,
         audioCuesEnabled: true,
         livePreviewEnabled: true,
-        advisoryParaphraseGuard: true
+        advisoryParaphraseGuard: true,
+        stopOnReturnOrSpace: true
     )
 }
 
 extension Settings {
-    /// Decodes every field strictly except `advisoryParaphraseGuard`, which falls back to the default
-    /// when the file does not carry it.
+    /// Decodes every field strictly except `advisoryParaphraseGuard` and `stopOnReturnOrSpace`, which
+    /// fall back to their defaults when the file does not carry them.
     ///
     /// The general rule for this file stands: a file that will not decode is replaced by defaults,
-    /// because a background app must not die on a corrupt settings file. This one key is exempt
-    /// because it is the only key an already-written file can be missing, and treating that as
+    /// because a background app must not die on a corrupt settings file. These two keys are exempt
+    /// because they are the only keys an already-written file can be missing, and treating that as
     /// corruption would take the user's glossary with it: the measured six-term glossary would become
-    /// an empty one on the first launch after the field was added, which is worse dictation rather
+    /// an empty one on the first launch after a field was added, which is worse dictation rather
     /// than a reset toggle.
     ///
     /// Written in an extension rather than in the type's body so that the memberwise initialiser
@@ -136,6 +145,8 @@ extension Settings {
         livePreviewEnabled = try container.decode(Bool.self, forKey: .livePreviewEnabled)
         advisoryParaphraseGuard = try container.decodeIfPresent(Bool.self, forKey: .advisoryParaphraseGuard)
             ?? Settings.default.advisoryParaphraseGuard
+        stopOnReturnOrSpace = try container.decodeIfPresent(Bool.self, forKey: .stopOnReturnOrSpace)
+            ?? Settings.default.stopOnReturnOrSpace
     }
 }
 

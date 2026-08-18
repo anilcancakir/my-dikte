@@ -272,3 +272,78 @@ struct ChatClient {
         }
     }
 }
+
+// MARK: - Connection pre-warm
+
+extension ChatClient {
+    /// How long a pre-warm may take before it is abandoned. Short on purpose: it exists to be finished
+    /// before the recording is, and one that outlives the dictation it was opened for has missed its
+    /// only chance to be useful.
+    static let prewarmTimeoutSeconds: TimeInterval = 5
+
+    /// What a pre-warm did, as a value rather than a thrown error, because a dictation must not fail
+    /// over a connection that was only being opened early.
+    enum PrewarmOutcome: Sendable, Equatable {
+        case opened(host: String, duration: Duration)
+        /// The endpoint named no host, so there was nothing to open a connection to.
+        case skipped(reason: String)
+        case failed(host: String, reason: String)
+    }
+
+    /// The host this endpoint's requests go to, or `nil` when the string names none.
+    ///
+    /// Pure, and separate from the request below, so the log can name what was warmed and a
+    /// half-written endpoint in the Settings pane resolves to "nothing to warm" rather than to a
+    /// request against a host nobody asked for.
+    static func host(forEndpoint endpoint: String) -> String? {
+        guard let host: String = URLComponents(string: endpoint)?.host, !host.isEmpty else {
+            return nil
+        }
+        return host
+    }
+
+    /// The request that opens the connection, or `nil` when the endpoint names no host.
+    ///
+    /// The URL is the endpoint itself, unchanged: `URLSession`'s connection pool is keyed by scheme,
+    /// host and port, so warming any other origin would leave the real POST to open its own connection
+    /// and the handshake would be wasted.
+    ///
+    /// `HEAD` because a handshake is the whole point. Both supported endpoints answer a HEAD with 404,
+    /// which is a completed TLS handshake, no API key, no body and no completion: a real cleanup request
+    /// here would cost tokens against a rate limit the user is already close to and would put a reply
+    /// nowhere useful.
+    static func prewarmRequest(forEndpoint endpoint: String) -> URLRequest? {
+        guard host(forEndpoint: endpoint) != nil, let url = URL(string: endpoint) else {
+            return nil
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "HEAD"
+        request.timeoutInterval = prewarmTimeoutSeconds
+        // Without this the URL cache could answer from disk and no connection would be opened at all,
+        // which is a pre-warm that measures fast and warms nothing.
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        return request
+    }
+
+    /// Opens the connection this endpoint's next request will reuse, and does nothing else.
+    ///
+    /// `session` must be the one the real request goes through, `URLSession.shared` for every caller in
+    /// this app, or the handshake lands in a pool the request never reads. The response is read and
+    /// dropped: the side effect is the point, since `URLSession` keeps the connection it just opened.
+    static func prewarm(endpoint: String, session: URLSession = .shared) async -> PrewarmOutcome {
+        guard let request: URLRequest = prewarmRequest(forEndpoint: endpoint), let host: String = host(
+            forEndpoint: endpoint
+        ) else {
+            return .skipped(reason: "the endpoint \"\(endpoint)\" names no host")
+        }
+
+        let started: ContinuousClock.Instant = .now
+        do {
+            _ = try await session.data(for: request)
+        } catch {
+            return .failed(host: host, reason: error.localizedDescription)
+        }
+        return .opened(host: host, duration: started.duration(to: .now))
+    }
+}

@@ -305,6 +305,24 @@ final class DictationPipeline {
     /// would steal the focus the dictation just went to.
     var onFailure: (String) -> Void = { _ in }
 
+    /// Whether a recording that only a command can end is in flight right now. `ShortcutCoordinator`
+    /// listens, because this is the only thing that makes a bare Return or Space visible to this app:
+    /// the pipeline is the sole authority on whether a dictation is running, since one can also end by
+    /// cancel or by error.
+    var onLatchedRecordingChange: (Bool) -> Void = { _ in }
+
+    /// How the recording that is running now was started, which is what decides whether a bare Return
+    /// or Space may end it.
+    enum RecordingTrigger: Sendable, Equatable {
+        /// The push-to-talk chord. The gesture ends when the keys come up, so nothing else needs to end
+        /// it, and its modifiers are held throughout, which makes any Space pressed during it a
+        /// modified press belonging to the focused application.
+        case heldChord
+        /// A keyed shortcut or the menu. The recording runs until something ends it, and a stop key is
+        /// one of the things that may.
+        case latched
+    }
+
     private let capture = AudioCapture()
     private let indicator = IndicatorPanel()
     private let livePreview = LivePreview()
@@ -321,6 +339,10 @@ final class DictationPipeline {
     private var configuration = PipelineConfiguration(settings: .load())
     private var requestedMode: DictationRecord.Mode = .dictate
     private var activeMode: DictationRecord.Mode = .dictate
+    private var requestedTrigger: RecordingTrigger = .latched
+    private var activeTrigger: RecordingTrigger = .latched
+    /// What the shortcut layer was last told, so it hears a change and not every stage transition.
+    private var isPublishedAsLatched = false
     private var focusTarget: FocusTarget?
 
     init() {
@@ -363,8 +385,12 @@ final class DictationPipeline {
         perform(machine.handle(.warmUpAbandoned))
     }
 
-    func startRequested(mode: DictationRecord.Mode = .dictate) {
+    /// - Parameter trigger: how this recording is being started, which decides whether a bare Return or
+    ///   Space may end it. The chord passes `.heldChord`; the menu and the debug probes take the
+    ///   default, because a recording nobody is holding a key for has to be endable by something.
+    func startRequested(mode: DictationRecord.Mode = .dictate, trigger: RecordingTrigger = .latched) {
         requestedMode = mode
+        requestedTrigger = trigger
         perform(machine.handle(.startRequested))
     }
 
@@ -374,8 +400,12 @@ final class DictationPipeline {
 
     /// The keyed toggle. `mode` only applies when this press starts a dictation; a press that stops
     /// one keeps the mode the running dictation began with.
+    ///
+    /// Always latched: this shortcut is a key pressed and released, so nothing is being held that could
+    /// end the recording on its own.
     func toggleRequested(mode: DictationRecord.Mode = .dictate) {
         requestedMode = mode
+        requestedTrigger = .latched
         perform(machine.handle(.toggleRequested))
     }
 
@@ -398,6 +428,11 @@ final class DictationPipeline {
         _ = machine.handle(.stopRequested)
         indicator.beginRun(stage: machine.stage)
         publishStage()
+        // The same pre-warm a real recording opens, and this is the harshest case for it: a fixture run
+        // has no seconds of speech to hide the handshake in, so it only helps if it finishes inside the
+        // encode and transcribe window. That makes it measurable without a voice, which is the only way
+        // the pre-warm can be measured at all.
+        prewarmChatConnection(mode: mode, configuration: configuration)
         beginProcessing(mode: mode, target: target, preCaptured: recording)
     }
 
@@ -446,6 +481,7 @@ final class DictationPipeline {
         // next dictation without a restart, and never changes underneath a running one.
         configuration = PipelineConfiguration(settings: .load())
         activeMode = requestedMode
+        activeTrigger = requestedTrigger
         // Captured now rather than when the text is ready: the round trip is long enough for the
         // user to glance at another window, and pasting into that window is how a dictation lands
         // in the wrong app.
@@ -465,6 +501,48 @@ final class DictationPipeline {
         // the shortcut and the first recorded buffer. It reports why there is no preview to the log
         // and returns; there is no failure path from here into the dictation.
         livePreview.start(isEnabledInSettings: configuration.livePreviewEnabled)
+        // Last, and off this actor entirely: the recording is already running by the time the
+        // handshake starts.
+        prewarmChatConnection(mode: activeMode, configuration: configuration)
+    }
+
+    /// Opens the connection the cleanup or rewrite call will reuse, while the user is still speaking.
+    ///
+    /// Measured, and the reason it exists: transcription warms `api.groq.com`, and cleanup now goes to
+    /// `openrouter.ai`, a second host whose DNS lookup and TLS handshake the dictation used to pay for
+    /// on the critical path. A recording lasts seconds and the host is known the moment it starts, so
+    /// the handshake is paid during the recording instead of after the transcription.
+    ///
+    /// Detached, and nothing waits for it: it must not delay the start of recording, must not write
+    /// anything to the caret, and must not be able to fail a dictation, so its outcome is a logged
+    /// value rather than a thrown error. It also carries no API key and cannot produce a completion,
+    /// which would cost tokens against a rate limit the user is already close to.
+    private func prewarmChatConnection(mode: DictationRecord.Mode, configuration: PipelineConfiguration) {
+        let endpoint: String = configuration.chatEndpoint(for: mode)
+        let logger: Logger = self.logger
+
+        Task.detached(priority: .userInitiated) {
+            switch await ChatClient.prewarm(endpoint: endpoint) {
+            case .opened(let host, let duration):
+                // Logged as a number rather than a fact: this is the handshake the dictation no longer
+                // pays for, so it is the measurement of what the pre-warm is worth.
+                let milliseconds: Double = StageTimings.seconds(duration) * 1000
+                logger.notice(
+                    """
+                    pre-warmed \(host, privacy: .public) in \
+                    \(String(format: "%.0f", milliseconds), privacy: .public) ms
+                    """
+                )
+            case .skipped(let reason):
+                logger.notice("cleanup connection pre-warm skipped: \(reason, privacy: .public)")
+            case .failed(let host, let reason):
+                // Logged and otherwise ignored: the real request will open its own connection, so a
+                // failed pre-warm costs latency and never a dictation.
+                logger.error(
+                    "cleanup connection pre-warm to \(host, privacy: .public) failed: \(reason, privacy: .public)"
+                )
+            }
+        }
     }
 
     private func beginProcessing(
@@ -812,6 +890,32 @@ final class DictationPipeline {
             indicator.update(stage: stage)
         }
         onStageChange(stage)
+        publishLatchedRecording(for: stage)
+    }
+
+    /// Tells the shortcut layer whether a bare Return or Space may end what is running now.
+    ///
+    /// Derived from the stage in one place rather than announced on each path a run can end on. There
+    /// are seven of those, and a missed one would leave the two keys swallowed after the recording was
+    /// over, which is the one failure this feature must not have.
+    private func publishLatchedRecording(for stage: PipelineStage) {
+        let isLatched: Bool = Self.isLatchedRecording(stage: stage, trigger: activeTrigger)
+        guard isLatched != isPublishedAsLatched else {
+            return
+        }
+
+        isPublishedAsLatched = isLatched
+        onLatchedRecordingChange(isLatched)
+    }
+
+    /// Whether a bare Return or Space may end the recording these two values describe.
+    ///
+    /// A latched recording is one that runs until something ends it, which is a keyed shortcut's or the
+    /// menu's. The chord is excluded because releasing it already ends the gesture, and every stage
+    /// other than `recording` is excluded because the keys are watched for the seconds a recording
+    /// lasts and not a moment longer.
+    nonisolated static func isLatchedRecording(stage: PipelineStage, trigger: RecordingTrigger) -> Bool {
+        stage == .recording && trigger == .latched
     }
 
     private func finish(message: String?, isFailure: Bool) {

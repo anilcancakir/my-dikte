@@ -596,6 +596,20 @@ private struct BehaviourPane: View {
             Toggle("Insert the cleanup even when the guard has a concern", isOn: $settings.advisoryParaphraseGuard)
                 .onChange(of: settings.advisoryParaphraseGuard) { _, _ in onChange() }
 
+            Toggle("End a recording with Return or Space", isOn: $settings.stopOnReturnOrSpace)
+                .onChange(of: settings.stopOnReturnOrSpace) { _, _ in onChange() }
+
+            Text("Return and Space are watched only while a recording started by a shortcut is running, "
+                + "and the key that stops it does not reach the app you are typing into. At every other "
+                + "moment both keys behave normally, because neither is registered as a global "
+                + "shortcut. Two things to know: the push-to-talk chord ignores them, since letting go "
+                + "already ends it, and with a password field focused macOS hides key presses from this "
+                + "app, so there the shortcut is the only way to stop. Takes effect at the next launch, "
+                + "like the shortcuts themselves.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
             Text("The paraphrase guard watches for a cleanup that rewrote you instead of cleaning you "
                 + "up. On, it inserts the cleanup anyway and shows what concerned it, and the word it "
                 + "flagged becomes a glossary suggestion on the Glossary pane. Off, it throws that "

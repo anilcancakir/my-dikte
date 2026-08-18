@@ -15,6 +15,20 @@ import os
 /// Toggle and cancel are keyed, so they go through Carbon, which needs only key-down and is not
 /// affected by secure input at all.
 ///
+/// A third gesture arrived later and belongs to the tap for the same reason the chord does: while a
+/// **latched** recording is in flight (one started by a keyed shortcut or the menu, so it runs until
+/// something ends it), a bare Return or Space ends it. The tap is the only one of the two mechanisms
+/// that can see an unmodified key at all, and the keys are watched for the seconds a recording lasts
+/// and at no other moment, because registering either one globally would take it away from every
+/// application in the session.
+///
+/// **Secure input takes that gesture away, and the keyed shortcut is the way out.** With a password
+/// field focused the tap loses KeyDown and KeyUp while FlagsChanged still flows
+/// (`references/Handy/src-tauri/src/secure_input.rs:1-20`), so a Return pressed there never reaches
+/// this app and the recording keeps running. Carbon is unaffected, so pressing the keyed shortcut
+/// again still stops it. That is a documented limitation of the stop keys rather than a fault to go
+/// hunting for later.
+///
 /// This type deliberately knows nothing about audio: it emits events and Step 17 wires them to
 /// `AudioCapture`.
 ///
@@ -141,6 +155,11 @@ final class ShortcutCoordinator: @unchecked Sendable {
         case toggleRequested
         /// The keyed cancel shortcut fired.
         case cancelRequested
+        /// A bare Return or Space was pressed while a latched recording was in flight, and was
+        /// swallowed rather than passed on. Deliberately not `toggleRequested`: that one starts a
+        /// dictation when none is running, and a stop key that arrived a moment after the recording
+        /// ended must do nothing at all rather than start a new one.
+        case stopKeyRequested
         /// The keyed Mode 2 shortcut fired: start or stop a dictation that is rewritten into an
         /// English prompt rather than cleaned up. Added after Step 17 shipped, because the pipeline
         /// supported Mode 2 from the start (`toggleRequested(mode:)`) while nothing could trigger
@@ -162,6 +181,10 @@ final class ShortcutCoordinator: @unchecked Sendable {
         var promptToggle: CarbonHotkey.Binding
         var minimumHoldSeconds: TimeInterval
         var abandonWindowSeconds: TimeInterval
+        /// Whether a bare Return or Space may end a latched recording. `Settings.stopOnReturnOrSpace`
+        /// supplies it, through `AppDelegate`, and it is read once at launch like every other
+        /// shortcut here: turning it off takes effect on the next launch.
+        var stopOnReturnOrSpace: Bool
 
         /// Defaults live here until Step 10's `Settings` supplies them; that step owns the persisted
         /// shortcut fields, and this step is written not to depend on a Wave 2 sibling.
@@ -171,7 +194,8 @@ final class ShortcutCoordinator: @unchecked Sendable {
             cancel: CarbonHotkey.Binding = Binding.defaultCancel,
             promptToggle: CarbonHotkey.Binding = Binding.defaultPromptToggle,
             minimumHoldSeconds: TimeInterval = ShortcutCoordinator.minimumHoldSeconds,
-            abandonWindowSeconds: TimeInterval = ShortcutCoordinator.abandonWindowSeconds
+            abandonWindowSeconds: TimeInterval = ShortcutCoordinator.abandonWindowSeconds,
+            stopOnReturnOrSpace: Bool = true
         ) {
             self.chord = chord
             self.toggle = toggle
@@ -179,6 +203,7 @@ final class ShortcutCoordinator: @unchecked Sendable {
             self.promptToggle = promptToggle
             self.minimumHoldSeconds = minimumHoldSeconds
             self.abandonWindowSeconds = abandonWindowSeconds
+            self.stopOnReturnOrSpace = stopOnReturnOrSpace
         }
 
         /// Namespace for the default keyed bindings, kept out of `CarbonHotkey` so that type stays a
@@ -245,8 +270,12 @@ final class ShortcutCoordinator: @unchecked Sendable {
     private let onEvent: @MainActor @Sendable (Event) -> Void
     private let logger = Logger(subsystem: BundleInfo.bundleIdentifier, category: "Shortcuts")
     private let timerQueue = DispatchQueue(label: "\(BundleInfo.bundleIdentifier).shortcuts.timers")
+    /// Guards both state machines below. One lock rather than two: the tap callback touches exactly
+    /// one of them per event, so there is nothing to contend, and a second lock would only add an
+    /// ordering rule to get wrong.
     private let machineLock = NSLock()
     private var machine: ChordMachine
+    private var stopKeys: StopKeyMachine
     private var listener: EventTapListener?
     private var carbon: CarbonHotkey?
 
@@ -254,6 +283,7 @@ final class ShortcutCoordinator: @unchecked Sendable {
         self.configuration = configuration
         self.onEvent = onEvent
         machine = ChordMachine(chord: configuration.chord)
+        stopKeys = StopKeyMachine(isEnabled: configuration.stopOnReturnOrSpace)
     }
 
     deinit {
@@ -310,6 +340,18 @@ final class ShortcutCoordinator: @unchecked Sendable {
 
         machineLock.lock()
         machine = ChordMachine(chord: configuration.chord)
+        stopKeys = StopKeyMachine(isEnabled: configuration.stopOnReturnOrSpace)
+        machineLock.unlock()
+    }
+
+    /// Told by the pipeline whether a latched recording is in flight, since only the pipeline knows:
+    /// a dictation can also end by cancel or by error, and a chord recording is not latched at all.
+    ///
+    /// This is the only thing that makes Return and Space visible to this app. Called on the main
+    /// actor and read on the tap thread, so it goes through the same lock as the chord state.
+    func setLatchedRecording(_ isInFlight: Bool) {
+        machineLock.lock()
+        stopKeys.setLatchedRecording(isInFlight)
         machineLock.unlock()
     }
 
@@ -322,15 +364,39 @@ final class ShortcutCoordinator: @unchecked Sendable {
     // MARK: - Event plumbing
 
     private func handleTapEvent(_ keyEvent: EventTapListener.KeyEvent) -> EventTapListener.Disposition {
-        // Keyed events are not this tap's business: the toggle and cancel shortcuts come through
-        // Carbon, so they pass straight to the focused app.
+        // The keyed shortcuts are still not this tap's business: the toggle, cancel and Mode 2
+        // shortcuts come through Carbon. A key press only matters here when it is a stop key for a
+        // latched recording, which is what `StopKeyMachine` decides.
         guard keyEvent.kind == .flagsChanged else {
-            return .pass
+            return stopKeyDisposition(for: keyEvent)
         }
 
         let outcome: ChordMachine.Outcome = advance(.flagsChanged(keyCode: keyEvent.keyCode, flags: keyEvent.flags))
         apply(outcome)
         return outcome.swallow ? .swallow : .pass
+    }
+
+    /// The key-down and key-up half of the tap. Everything the stop-key gesture is not interested in
+    /// returns `.pass` here, which is the safety property of the whole feature: with no latched
+    /// recording, the tap reads Return and Space and hands them straight on.
+    private func stopKeyDisposition(for keyEvent: EventTapListener.KeyEvent) -> EventTapListener.Disposition {
+        machineLock.lock()
+        let decision: StopKeyMachine.Decision = stopKeys.handle(
+            kind: keyEvent.kind,
+            keyCode: keyEvent.keyCode,
+            flags: keyEvent.flags
+        )
+        machineLock.unlock()
+
+        switch decision {
+        case .pass:
+            return .pass
+        case .swallow:
+            return .swallow
+        case .stopRecording:
+            emit([.stopKeyRequested])
+            return .swallow
+        }
     }
 
     private func handleKeyedHotkey(id: UInt32) {
@@ -416,6 +482,7 @@ extension ShortcutCoordinator.Event {
         case .toggleRequested: return "toggleRequested"
         case .cancelRequested: return "cancelRequested"
         case .promptToggleRequested: return "promptToggleRequested"
+        case .stopKeyRequested: return "stopKeyRequested"
         }
     }
 }
@@ -593,6 +660,102 @@ extension ShortcutCoordinator {
             isSecondDown = false
             generation += 1
             return Outcome(events: events)
+        }
+    }
+}
+
+extension ShortcutCoordinator {
+    /// The bare-key stop gesture as a pure state machine: while a latched recording is in flight,
+    /// Return or Space ends it instead of reaching the focused application.
+    ///
+    /// Pure for the same reason `ChordMachine` is, and a separate type because the two share no state
+    /// and not even an event kind: this one reads `keyDown` and `keyUp`, the chord reads
+    /// `flagsChanged`. That separation is also where the secure-input limitation lives: a focused
+    /// password field stops `keyDown` reaching the tap at all, so this gesture silently cannot fire
+    /// there while the chord and the Carbon shortcuts keep working.
+    ///
+    /// "Latched" is the pipeline's word for a recording that runs until something ends it, which is
+    /// every recording except the push-to-talk chord. The chord ends when the keys come up, so it
+    /// needs no stop key, and its modifiers are held throughout, which would make any Space pressed
+    /// during it a modified press this machine passes on anyway.
+    struct StopKeyMachine: Sendable {
+        /// What the tap must do with the event it just read.
+        enum Decision: Sendable, Equatable {
+            /// Not ours: it reaches the focused application untouched.
+            case pass
+            /// Ours, and it ends the recording. Swallowed as well as acted on: a dictation landing in
+            /// a text field must not also gain the newline or the space that stopped it.
+            case stopRecording
+            /// Ours, but not a fresh stop: the key-up of a key-down already swallowed, or its
+            /// auto-repeat. Swallowed too, because handing an application half a key press it never
+            /// saw begin is the same stray input this gesture exists to avoid.
+            case swallow
+        }
+
+        /// Return (36) and Space (49), fixed rather than configurable: they are the two keys a hand
+        /// already on the keyboard reaches without looking, which is the whole reason the gesture
+        /// exists, and a third one would only be a key taken away from a recording's own seconds.
+        static let stopKeyCodes: Set<Int64> = [Int64(kVK_Return), Int64(kVK_Space)]
+
+        /// A press carrying any of these belongs to the focused application: Command-Return sends in
+        /// half the apps on this machine, and Option-Space and Shift-Space type characters. Caps Lock,
+        /// Fn and `maskNonCoalesced` are deliberately absent, because none of them changes what
+        /// Return or Space means.
+        private static let disqualifyingModifiers: CGEventFlags = [
+            .maskCommand,
+            .maskControl,
+            .maskAlternate,
+            .maskShift,
+        ]
+
+        private let isEnabled: Bool
+        private var isLatchedRecording: Bool = false
+        /// The keys whose key-down was swallowed, and whose key-up is therefore owed the same. Kept
+        /// independently of the latch because the recording has already stopped by the time the key
+        /// comes up, and a stale entry cannot outlive the gesture: `stop()` rebuilds this machine.
+        private var swallowedKeyCodes: Set<Int64> = []
+
+        init(isEnabled: Bool) {
+            self.isEnabled = isEnabled
+        }
+
+        mutating func setLatchedRecording(_ isInFlight: Bool) {
+            isLatchedRecording = isInFlight
+        }
+
+        mutating func handle(
+            kind: EventTapListener.KeyEvent.Kind,
+            keyCode: Int64,
+            flags: CGEventFlags
+        ) -> Decision {
+            guard isEnabled, Self.stopKeyCodes.contains(keyCode) else {
+                return .pass
+            }
+
+            switch kind {
+            case .keyDown:
+                // Auto-repeat of a press already acted on. The recording is stopping, so this is not
+                // a second stop, and the repeats must not reach the application either.
+                if swallowedKeyCodes.contains(keyCode) {
+                    return .swallow
+                }
+                guard isLatchedRecording, Self.isUnmodified(flags) else {
+                    return .pass
+                }
+                swallowedKeyCodes.insert(keyCode)
+                return .stopRecording
+
+            case .keyUp:
+                return swallowedKeyCodes.remove(keyCode) == nil ? .pass : .swallow
+
+            case .flagsChanged:
+                // The chord's half of the tap, and it never carries one of these key codes anyway.
+                return .pass
+            }
+        }
+
+        private static func isUnmodified(_ flags: CGEventFlags) -> Bool {
+            flags.intersection(disqualifyingModifiers).isEmpty
         }
     }
 }

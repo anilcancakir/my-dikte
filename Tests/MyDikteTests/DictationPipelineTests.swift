@@ -587,3 +587,39 @@ struct ThinTranscriptAdviceTests {
         #expect(advice == "")
     }
 }
+
+/// Which recordings a bare Return or Space may end. The pipeline is the only thing that knows a
+/// dictation is in flight and how it was started, so this is its half of the stop-key decision; the
+/// coordinator owns the other half (which keys, unmodified, and whether the setting is on).
+@Suite("Latched recording")
+struct LatchedRecordingTests {
+    @Test("a recording started by a keyed shortcut is latched, so a stop key may end it")
+    func keyedRecordingIsLatched() {
+        #expect(DictationPipeline.isLatchedRecording(stage: .recording, trigger: .latched))
+    }
+
+    /// The push-to-talk gesture ends when the keys come up, so it needs nothing else to end it, and
+    /// its modifiers are held while it runs: a Space pressed there is a modified press belonging to
+    /// the focused application.
+    @Test("a push-to-talk recording is not latched, because releasing the chord already ends it")
+    func chordRecordingIsNotLatched() {
+        #expect(!DictationPipeline.isLatchedRecording(stage: .recording, trigger: .heldChord))
+    }
+
+    @Test("no stage other than recording is latched, so the keys are watched for seconds and not longer")
+    func onlyTheRecordingStageIsLatched() {
+        let stages: [PipelineStage] = [
+            .idle,
+            .working(.encoding),
+            .working(.transcribing),
+            .working(.cleaning),
+            .working(.rewriting),
+            .inserting,
+        ]
+
+        for stage in stages {
+            #expect(!DictationPipeline.isLatchedRecording(stage: stage, trigger: .latched))
+            #expect(!DictationPipeline.isLatchedRecording(stage: stage, trigger: .heldChord))
+        }
+    }
+}

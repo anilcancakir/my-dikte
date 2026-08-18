@@ -127,13 +127,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// since re-registering Carbon hot keys and the tap under a live push-to-talk gesture is a
     /// different piece of work.
     private func setUpShortcuts() {
-        let configuration: ShortcutCoordinator.Configuration = ShortcutBinding.configuration(from: Settings.load())
+        let settings: Settings = .load()
+        var configuration: ShortcutCoordinator.Configuration = ShortcutBinding.configuration(from: settings)
+        // Set here rather than in `ShortcutBinding`: that type translates recorded key primitives into
+        // registrations, and this is a plain toggle with nothing to translate.
+        configuration.stopOnReturnOrSpace = settings.stopOnReturnOrSpace
         logger.notice("shortcut configuration: \(Self.describe(configuration), privacy: .public)")
 
         let coordinator = ShortcutCoordinator(configuration: configuration) { [weak self] event in
             self?.handle(event)
         }
         shortcuts = coordinator
+        // Return and Space are watched only while the pipeline reports a latched recording, and the
+        // pipeline is the only thing that can report it: a dictation also ends by cancel and by error,
+        // so counting shortcut presses here would leave the keys swallowed after a run nobody stopped.
+        pipeline?.onLatchedRecordingChange = { [weak coordinator] isInFlight in
+            coordinator?.setLatchedRecording(isInFlight)
+        }
         startShortcuts()
     }
 
@@ -149,7 +159,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .map { "\($0.0) keyCode \($0.1.keyCode) modifiers 0x\(String($0.1.modifiers, radix: 16))" }
             .joined(separator: ", ")
 
-        return "chord \(configuration.chord.first.rawValue) then \(configuration.chord.second.rawValue), \(keyedText)"
+        let stopKeys: String = configuration.stopOnReturnOrSpace ? "on" : "off"
+
+        return "chord \(configuration.chord.first.rawValue) then \(configuration.chord.second.rawValue), "
+            + "\(keyedText), stop keys \(stopKeys)"
     }
 
     private func handle(_ event: ShortcutCoordinator.Event) {
@@ -160,13 +173,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .firstModifierDown:
             pipeline.warmUpRequested()
         case .chordCompleted:
-            pipeline.startRequested()
+            // Held, so the gesture ends when the keys come up and no stop key is watched for it.
+            pipeline.startRequested(trigger: .heldChord)
         case .chordReleased:
             pipeline.stopRequested()
         case .chordAbandoned:
             pipeline.warmUpAbandoned()
         case .toggleRequested:
             pipeline.toggleRequested()
+        case .stopKeyRequested:
+            // A bare Return or Space that the tap swallowed. `stopRequested` does nothing unless a
+            // recording is in flight, which is what makes a key arriving just after one ended harmless
+            // rather than the start of a dictation nobody asked for.
+            pipeline.stopRequested()
         case .cancelRequested:
             pipeline.cancelRequested()
         case .promptToggleRequested:
