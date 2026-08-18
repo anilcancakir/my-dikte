@@ -478,9 +478,27 @@ final class DictationPipeline {
             let pcmURL = recording.fileURL
             let m4aURL = pcmURL.deletingPathExtension().appendingPathExtension("m4a")
             temporaryFiles.append(m4aURL)
+            // Dead air at the head is dropped here rather than sent. A Bluetooth microphone delivers
+            // exact zeros for about a second and a half while its link opens, and Whisper answers
+            // leading digital silence by inventing a stock caption instead of transcribing: a real
+            // 8.14 s dictation came back as "İzlediğiniz için teşekkürler." and the same samples with
+            // 1.85 s trimmed came back as the sentence the user actually said.
+            let leadingSilence: Double = LeadingSilence.secondsToTrim(
+                chunkRMS: recording.chunkRMS,
+                chunkSeconds: recording.chunkSeconds
+            )
+            if leadingSilence > 0 {
+                logger.notice(
+                    "trimming \(String(format: "%.2f", leadingSilence), privacy: .public) s of leading silence"
+                )
+            }
             let encodeStarted = ContinuousClock.now
             let audioData: Data = try await Task.detached(priority: .userInitiated) {
-                try AudioEncoder.encodeM4A(pcmFileURL: pcmURL, to: m4aURL)
+                try AudioEncoder.encodeM4A(
+                    pcmFileURL: pcmURL,
+                    to: m4aURL,
+                    skippingLeadingSeconds: leadingSilence
+                )
                 // Only readable once `encodeM4A` has returned: the container index is written when
                 // its `AVAudioFile` deinits, which is at the end of that call.
                 return try Data(contentsOf: m4aURL)
@@ -502,7 +520,16 @@ final class DictationPipeline {
             logger.notice("transcribed \(raw.count, privacy: .public) characters")
 
             // 5. A stock phrase invented for a near-silent clip never reaches the caret.
-            if let discardReason = Self.discardReason(forTranscript: raw, duration: recording.duration) {
+            // Voiced seconds, not wall-clock duration. The filter's premise is about how much real
+            // audio the model had, and wall clock is not that: a real 8.14 s dictation whose first
+            // 1.85 s was a Bluetooth link opening came back as the stock phrase
+            // "İzlediğiniz için teşekkürler.", which is in the filter's list, and skipped the check
+            // entirely because 8.14 s is past the six second cut-off. Voiced seconds is the variable
+            // the premise actually names.
+            if let discardReason = Self.discardReason(
+                forTranscript: raw,
+                duration: analysis.voicedSeconds
+            ) {
                 remove(temporaryFiles)
                 appendRecord(
                     timestamp: timestamp,

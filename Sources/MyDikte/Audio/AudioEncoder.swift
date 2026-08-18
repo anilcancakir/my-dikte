@@ -44,10 +44,15 @@ enum AudioEncoder {
     /// 16 kHz survives the encoder untouched here, verified with `afinfo`, so there is no
     /// resample step: the same reference resamples sub-32 kHz input to 44.1 kHz, and doing that
     /// would triple the upload for no transcription benefit.
+    /// - Parameter skippingLeadingSeconds: audio to drop from the front before encoding. Non-zero only
+    ///   when the capture began with digital silence, which a Bluetooth microphone produces for about a
+    ///   second and a half while its link opens. Whisper does not ignore that silence, it invents a
+    ///   caption to fill it, so it must not reach the request. See `LeadingSilence`.
     static func encodeM4A(
         pcmFileURL: URL,
         to destinationURL: URL,
-        sampleRate: Double = AudioCapture.sampleRate
+        sampleRate: Double = AudioCapture.sampleRate,
+        skippingLeadingSeconds: Double = 0
     ) throws {
         guard let inputFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
@@ -86,6 +91,19 @@ enum AudioEncoder {
             )
         } catch {
             throw Failure.encodeFailed(error.localizedDescription)
+        }
+
+        // Seek past the dead air rather than reading and discarding it. The offset is rounded down to
+        // a whole frame, because a float32 sample split across the boundary would shift every sample
+        // after it by a byte and turn the whole recording into noise.
+        if skippingLeadingSeconds > 0 {
+            let frames = Int(skippingLeadingSeconds * sampleRate)
+            let offset = UInt64(frames * MemoryLayout<Float>.size)
+            do {
+                try sourceHandle.seek(toOffset: offset)
+            } catch {
+                throw Failure.sourceUnreadable(error.localizedDescription)
+            }
         }
 
         var wroteFrames = false
