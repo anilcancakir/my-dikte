@@ -56,7 +56,8 @@ struct SettingsPersistenceTests {
             historyLimit: 25,
             retainAudio: false,
             audioCuesEnabled: false,
-            livePreviewEnabled: false
+            livePreviewEnabled: false,
+            advisoryParaphraseGuard: false
         )
 
         let data = try JSONEncoder().encode(settings)
@@ -66,7 +67,42 @@ struct SettingsPersistenceTests {
         #expect(decoded.retainAudio == false)
         #expect(decoded.audioCuesEnabled == false)
         #expect(decoded.livePreviewEnabled == false)
+        #expect(decoded.advisoryParaphraseGuard == false)
         #expect(decoded.promptToggleShortcut == settings.promptToggleShortcut)
+    }
+
+    /// The guard is advisory unless it is turned off, because the measurement says so: over one day of
+    /// real use it rejected three correct cleanups and caught no genuine paraphrase.
+    @Test("the paraphrase guard defaults to advisory")
+    func advisoryGuardDefaultsToOn() {
+        #expect(Settings.default.advisoryParaphraseGuard == true)
+    }
+
+    /// A settings file written before this field existed must keep everything else it holds. A strict
+    /// decode would throw, `load` would fall back to defaults, and the user's measured six-term
+    /// glossary would silently become an empty one, which is a worse dictation rather than a reset
+    /// toggle. Only this one key is treated as optional: it is the only key an existing file can be
+    /// missing.
+    @Test("a settings file written before the advisory field keeps its glossary and gains the default")
+    func olderSettingsFileKeepsItsGlossary() throws {
+        let directory: URL = Self.makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let olderFile = """
+            {"pushToTalkChord":{"modifierKeys":[]},"toggleShortcut":{"modifierKeys":[]},\
+            "cancelShortcut":{"modifierKeys":[]},"promptToggleShortcut":{"modifierKeys":[]},\
+            "glossaryTerms":["Kubernetes","Grafana","PyQt","Speech to Text","LLM","prompt"],\
+            "transcriptionProvider":"groq","transcriptionModelId":"","cleanupModelId":"",\
+            "cleanupEndpoint":"","rewriteEndpoint":"","autoInsert":true,"historyLimit":50,\
+            "retainAudio":true,"audioCuesEnabled":true,"livePreviewEnabled":true}
+            """
+        try Data(olderFile.utf8).write(to: Settings.fileURL(in: directory))
+
+        let loaded = Settings.load(from: directory)
+        #expect(loaded.glossaryTerms.count == 6)
+        #expect(loaded.glossaryTerms.contains("PyQt"))
+        #expect(loaded.advisoryParaphraseGuard == true)
     }
 
     /// The push-to-talk gesture is an ordered pair of physical keys, so both the order and the side

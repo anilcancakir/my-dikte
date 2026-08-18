@@ -86,6 +86,49 @@ struct DictationLogTests {
         #expect(decoded[0].rejectedCleanup == nil)
     }
 
+    /// The reason is prose and the concern is data, and only the data can be counted. Counting how
+    /// often the guard flags a term by matching "introduced a word that was not spoken" would break
+    /// the first time that sentence changed, so the term travels as a field.
+    @Test("a guard concern survives the round trip as data, with its kind and its term")
+    func guardConcernRoundTrips() throws {
+        let directory = Self.makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try DictationLog.append(
+            Self.makeRecord(
+                guardConcern: ParaphraseGuard.Concern(kind: .introducedWord, term: "optimize")
+            ),
+            to: directory
+        )
+
+        let decoded = try Self.decodeLines(from: directory)
+        #expect(decoded[0].guardConcern?.kind == .introducedWord)
+        #expect(decoded[0].guardConcern?.term == "optimize")
+    }
+
+    /// This file is append-only and predates the field, so a line without it is an older record and
+    /// not a corrupt one. It has to decode, or every dictation logged before today disappears from
+    /// the history list and from the ledger's read.
+    @Test("a line written before the concern field existed still decodes")
+    func olderLineWithoutTheConcernFieldStillDecodes() throws {
+        let directory = Self.makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let olderLine = """
+            {"timestamp":"2026-08-18T16:53:28Z","mode":"dictate","duration":6.5,\
+            "rawTranscript":"ham metin","finalText":"Ham metin.","transcriptionModelId":"whisper-large-v3",\
+            "cleanupModelId":"openai/gpt-oss-120b","timings":{"captureMs":1,"encodeMs":1,"transcribeMs":1,\
+            "cleanupMs":1,"insertMs":1,"totalMs":5}}
+            """
+        try Data("\(olderLine)\n".utf8).write(to: DictationLog.fileURL(in: directory))
+
+        let decoded = DictationLog.readAll(from: directory)
+        #expect(decoded.count == 1)
+        #expect(decoded[0].guardConcern == nil)
+        #expect(decoded[0].rawTranscript == "ham metin")
+    }
+
     @Test("the directory is created on first append with mode 0700")
     func directoryIsCreatedOnFirstAppendWithMode0700() throws {
         let directory = Self.makeScratchDirectory()
@@ -154,7 +197,8 @@ struct DictationLogTests {
         finalText: String = "Ham metin.",
         audioPath: URL? = URL(fileURLWithPath: "/tmp/does-not-need-to-exist.m4a"),
         paraphraseRejectionReason: String? = nil,
-        rejectedCleanup: String? = nil
+        rejectedCleanup: String? = nil,
+        guardConcern: ParaphraseGuard.Concern? = nil
     ) -> DictationRecord {
         DictationRecord(
             timestamp: Date(timeIntervalSince1970: 1_700_000_000),
@@ -165,6 +209,7 @@ struct DictationLogTests {
             finalText: finalText,
             paraphraseRejectionReason: paraphraseRejectionReason,
             rejectedCleanup: rejectedCleanup,
+            guardConcern: guardConcern,
             transcriptionModelId: "whisper-large-v3",
             cleanupModelId: "gpt-oss-120b",
             timings: DictationRecord.Timings(

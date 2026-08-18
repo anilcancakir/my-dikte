@@ -52,9 +52,13 @@ struct DictationRecord: Codable, Equatable {
     let duration: Double
     let rawTranscript: String
     let finalText: String
-    /// `nil` when the paraphrase guard accepted the cleanup or was never run; the rejection reason
-    /// otherwise. Presence of a reason is how a reader tells rejected from accepted, rather than a
-    /// separate boolean that could disagree with it.
+    /// `nil` when the paraphrase guard accepted the cleanup or was never run; the sentence the user
+    /// was shown otherwise. Presence of a sentence is how a reader tells "something was said about
+    /// this dictation" from "nothing was", rather than a separate boolean that could disagree with it.
+    ///
+    /// It no longer implies a rejection: in advisory mode it carries the concern while `finalText`
+    /// still holds the cleanup. `rejectedCleanup` is what distinguishes the two, and `guardConcern`
+    /// is what a reader should count.
     let paraphraseRejectionReason: String?
     /// The cleanup the paraphrase guard turned down, when it turned one down. `nil` both when
     /// nothing was rejected and when the cleanup call itself failed, since there was no candidate.
@@ -65,6 +69,16 @@ struct DictationRecord: Codable, Equatable {
     /// invisible for a whole wave because the candidate was discarded at the moment it was judged.
     /// Tuning the guard's thresholds against real dictations is only possible if this survives.
     let rejectedCleanup: String?
+    /// What the paraphrase guard found, as data: which check fired and the term at issue. This is
+    /// what makes a term countable across the file, which is what `GuardConcernLedger` needs;
+    /// recovering a term by matching `paraphraseRejectionReason` would break the first time that
+    /// sentence was reworded.
+    ///
+    /// Optional because this file is append-only and older lines predate the field: a missing key
+    /// here means an older record, not a corrupt file. That is the opposite of `Settings`, where a
+    /// file that will not decode is replaced by defaults, and it is why this one field is optional
+    /// rather than the file being versioned.
+    let guardConcern: ParaphraseGuard.Concern?
     let transcriptionModelId: String
     let cleanupModelId: String
     let timings: Timings
@@ -78,6 +92,7 @@ struct DictationRecord: Codable, Equatable {
         finalText: String,
         paraphraseRejectionReason: String?,
         rejectedCleanup: String?,
+        guardConcern: ParaphraseGuard.Concern? = nil,
         transcriptionModelId: String,
         cleanupModelId: String,
         timings: Timings
@@ -90,6 +105,7 @@ struct DictationRecord: Codable, Equatable {
         self.finalText = finalText
         self.paraphraseRejectionReason = paraphraseRejectionReason
         self.rejectedCleanup = rejectedCleanup
+        self.guardConcern = guardConcern
         self.transcriptionModelId = transcriptionModelId
         self.cleanupModelId = cleanupModelId
         self.timings = timings

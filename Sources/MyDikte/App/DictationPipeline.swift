@@ -54,6 +54,7 @@ struct PipelineConfiguration: Sendable, Equatable {
     let historyLimit: Int
     let audioCuesEnabled: Bool
     let livePreviewEnabled: Bool
+    let advisoryParaphraseGuard: Bool
 
     private let cleanupEndpoint: String
     private let rewriteEndpoint: String
@@ -68,8 +69,20 @@ struct PipelineConfiguration: Sendable, Equatable {
         historyLimit = settings.historyLimit
         audioCuesEnabled = settings.audioCuesEnabled
         livePreviewEnabled = settings.livePreviewEnabled
+        advisoryParaphraseGuard = settings.advisoryParaphraseGuard
         cleanupEndpoint = Self.resolvedEndpoint(settings.cleanupEndpoint)
         rewriteEndpoint = Self.resolvedEndpoint(settings.rewriteEndpoint)
+    }
+
+    /// What a paraphrase concern does to this dictation. Resolved here, with every other per-run
+    /// decision, so a settings change takes effect on the next dictation and never mid-flight.
+    func guardPolicy(for mode: DictationRecord.Mode) -> InsertionChoice.GuardPolicy {
+        switch mode {
+        case .prompt:
+            return .skipped
+        case .dictate:
+            return advisoryParaphraseGuard ? .advisory : .strict
+        }
     }
 
     func chatEndpoint(for mode: DictationRecord.Mode) -> String {
@@ -133,64 +146,117 @@ enum CleanupOutcome: Sendable, Equatable {
 /// never lost and the failure is never hidden. Both halves matter, and both live here rather than in
 /// the pipeline's control flow, so they can be asserted without a network.
 enum InsertionChoice: Sendable, Equatable {
-    case cleaned(String)
+    /// What the paraphrase guard's concern does to a dictation. Three states rather than a pair of
+    /// booleans, because "skipped" and "advisory" cannot both be true and a Bool pair could say so.
+    enum GuardPolicy: Sendable, Equatable {
+        /// The Mode 2 rewrite. The guard compares a cleanup against the words it was given, and an
+        /// English prompt rewritten from Turkish shares almost none of them by design, so running it
+        /// there would reject every rewrite and insert the Turkish transcript instead, which is the
+        /// opposite of what Mode 2 is for.
+        case skipped
+        /// The cleanup reaches the caret and the concern is surfaced beside it. The default, and it
+        /// was chosen on measurement: over one day of real use the guard rejected three correct
+        /// cleanups (a separated "ile", a repaired "Speech to Text", a repaired "optimize") and
+        /// caught no genuine paraphrase, and every one of those cleanups was lost to the user.
+        case advisory
+        /// A concern discards the cleanup and the raw transcript goes in instead. The way back, kept
+        /// reachable on purpose: advisory rests on a measurement, and a measurement can change.
+        case strict
+    }
+
+    /// - Parameter concern: what the guard found, when it found something and the policy was
+    ///   advisory. The cleaned text still reached the caret.
+    case cleaned(text: String, concern: ParaphraseGuard.Concern?)
     /// - Parameter rejectedCleanup: the candidate the paraphrase guard turned down, kept so the
     ///   guard's own thresholds can be judged later against real dictations. `nil` when there was
     ///   never a candidate, which is the cleanup-failed case.
-    case raw(text: String, reason: String, rejectedCleanup: String?)
+    /// - Parameter concern: what the guard found, or `nil` when the cleanup call itself failed and
+    ///   the guard never ran.
+    case raw(text: String, reason: String, rejectedCleanup: String?, concern: ParaphraseGuard.Concern?)
 
-    /// - Parameter applyingParaphraseGuard: false for the Mode 2 rewrite. The guard compares a
-    ///   cleanup against the words it was given, and an English prompt rewritten from Turkish
-    ///   shares almost none of them by design, so running it there would reject every rewrite and
-    ///   insert the Turkish transcript instead, which is the opposite of what Mode 2 is for.
     static func resolve(
         raw: String,
         cleanup: CleanupOutcome,
         glossary: [String],
-        applyingParaphraseGuard: Bool
+        guardPolicy: GuardPolicy
     ) -> InsertionChoice {
         switch cleanup {
         case .failed(let reason):
+            // Untouched by the policy: advisory is only about the guard, and a cleanup that never
+            // produced a candidate has nothing for the guard to have an opinion about.
             return .raw(
                 text: raw,
                 reason: "Cleanup failed, so the raw transcript went in: \(reason)",
-                rejectedCleanup: nil
+                rejectedCleanup: nil,
+                concern: nil
             )
 
         case .cleaned(let cleaned):
-            guard applyingParaphraseGuard else {
-                return .cleaned(cleaned)
+            guard guardPolicy != .skipped else {
+                return .cleaned(text: cleaned, concern: nil)
             }
-            switch ParaphraseGuard.check(raw: raw, cleaned: cleaned, glossary: glossary) {
-            case .accept:
-                return .cleaned(cleaned)
-            case .reject(let reason):
-                return .raw(
-                    text: raw,
-                    reason: "Raw transcript inserted instead: \(reason)",
-                    rejectedCleanup: cleaned
+            guard
+                case .concern(let concern) = ParaphraseGuard.check(
+                    raw: raw,
+                    cleaned: cleaned,
+                    glossary: glossary
                 )
+            else {
+                return .cleaned(text: cleaned, concern: nil)
             }
+
+            guard guardPolicy == .strict else {
+                return .cleaned(text: cleaned, concern: concern)
+            }
+            return .raw(
+                text: raw,
+                reason: "Raw transcript inserted instead: \(concern.sentence)",
+                rejectedCleanup: cleaned,
+                concern: concern
+            )
         }
     }
 
     var text: String {
         switch self {
-        case .cleaned(let text):
+        case .cleaned(let text, _):
             return text
-        case .raw(let text, _, _):
+        case .raw(let text, _, _, _):
             return text
         }
     }
 
-    /// Non-nil exactly when the raw transcript was inserted in place of a cleanup, and it is the
-    /// text both the indicator and the log line carry.
-    var rejectionReason: String? {
+    /// The sentence to surface, at the indicator and in the log record's reason field, or `nil` when
+    /// there is nothing to say. An advisory concern says its piece and the cleanup still went in, so
+    /// it is prefixed rather than left to read as a substitution.
+    var message: String? {
+        switch self {
+        case .cleaned(_, let concern):
+            return concern.map { "Advisory: \($0.sentence)" }
+        case .raw(_, let reason, _, _):
+            return reason
+        }
+    }
+
+    /// What the guard found, as data. The log carries this so that recurring terms can be counted
+    /// (`GuardConcernLedger`) without any reader parsing `message`.
+    var concern: ParaphraseGuard.Concern? {
+        switch self {
+        case .cleaned(_, let concern):
+            return concern
+        case .raw(_, _, _, let concern):
+            return concern
+        }
+    }
+
+    /// Whether the raw transcript went in where a cleanup was expected. That is the failure the user
+    /// has to see as one; an advisory concern is not one, since the cleanup did reach the caret.
+    var insertedRawInstead: Bool {
         switch self {
         case .cleaned:
-            return nil
-        case .raw(_, let reason, _):
-            return reason
+            return false
+        case .raw:
+            return true
         }
     }
 
@@ -202,11 +268,14 @@ enum InsertionChoice: Sendable, Equatable {
     /// cleanup prompt asks for, and that was invisible from the log until the candidate was kept.
     /// Same argument the plan makes for keeping the raw transcript rather than collapsing the two
     /// API calls into one: keep the artefact, or the failure is undetectable by construction.
+    ///
+    /// In advisory mode it is `nil` even when there is a concern, because nothing was turned down.
+    /// The cleanup is in `finalText`, where the user can read it.
     var rejectedCleanup: String? {
         switch self {
         case .cleaned:
             return nil
-        case .raw(_, _, let rejectedCleanup):
+        case .raw(_, _, let rejectedCleanup, _):
             return rejectedCleanup
         }
     }
@@ -574,8 +643,20 @@ final class DictationPipeline {
                 raw: raw,
                 cleanup: outcome,
                 glossary: configuration.glossaryTerms,
-                applyingParaphraseGuard: mode == .dictate
+                guardPolicy: configuration.guardPolicy(for: mode)
             )
+            if let concern = choice.concern {
+                // The term is a single dictated word and it is logged in the clear on purpose: it is
+                // the only way to see from outside the app which terms the guard keeps flagging, and
+                // the transcript itself already sits in `log.jsonl` beside it.
+                logger.notice(
+                    """
+                    guard concern \(concern.kind.rawValue, privacy: .public) \
+                    term \(concern.term ?? "none", privacy: .public) \
+                    inserted \(choice.insertedRawInstead ? "raw" : "cleanup", privacy: .public)
+                    """
+                )
+            }
 
             // 8. Insert. The cancellation check is here rather than only inside the clients,
             //    because a cancel that lands between the last response and the paste must still
@@ -596,8 +677,9 @@ final class DictationPipeline {
                 duration: recording.duration,
                 rawTranscript: raw,
                 finalText: choice.text,
-                reason: choice.rejectionReason,
+                reason: choice.message,
                 rejectedCleanup: choice.rejectedCleanup,
+                guardConcern: choice.concern,
                 timings: timings.record(totalSeconds: Self.elapsed(since: releasedAt)),
                 configuration: configuration
             )
@@ -605,11 +687,15 @@ final class DictationPipeline {
             // 10. The cue fires on a completed insertion, including one that inserted the raw
             //     transcript: the text did land. The reason still shows, because a failure that is
             //     not surfaced looks exactly like working dictation.
+            //
+            //     An advisory concern is surfaced the same way and is deliberately not a failure:
+            //     the cleanup reached the caret, so the status item stays out of its error state and
+            //     only the panel carries the note.
             if let insertionNote {
                 finish(message: insertionNote, isFailure: true)
             } else {
                 AudioCue.play(.insertComplete, enabled: configuration.audioCuesEnabled)
-                finish(message: choice.rejectionReason, isFailure: choice.rejectionReason != nil)
+                finish(message: choice.message, isFailure: choice.insertedRawInstead)
             }
         } catch is CancellationError {
             remove(temporaryFiles)
@@ -888,6 +974,7 @@ final class DictationPipeline {
         finalText: String,
         reason: String?,
         rejectedCleanup: String? = nil,
+        guardConcern: ParaphraseGuard.Concern? = nil,
         timings: DictationRecord.Timings,
         configuration: PipelineConfiguration
     ) {
@@ -903,6 +990,7 @@ final class DictationPipeline {
             // asks: why is `finalText` not the cleaned transcript.
             paraphraseRejectionReason: reason,
             rejectedCleanup: rejectedCleanup,
+            guardConcern: guardConcern,
             transcriptionModelId: configuration.transcriptionModelId,
             cleanupModelId: configuration.cleanupModelId,
             timings: timings

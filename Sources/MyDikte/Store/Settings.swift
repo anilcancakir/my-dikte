@@ -76,6 +76,12 @@ struct Settings: Codable, Equatable {
     /// The on-device live preview in the indicator while recording. On unless it is turned off:
     /// it costs no API call and no network, and it is the feature the user asked for by name.
     var livePreviewEnabled: Bool
+    /// Whether a paraphrase concern lets the cleanup through (advisory) or discards it in favour of
+    /// the raw transcript (strict). Advisory unless it is turned off, on the strength of a
+    /// measurement rather than a preference: over one day of real use the guard rejected three
+    /// correct cleanups and caught no genuine paraphrase. Strict stays reachable, because the
+    /// measurement can change and this is not a one-way door.
+    var advisoryParaphraseGuard: Bool
 
     static let `default` = Settings(
         pushToTalkChord: .unset,
@@ -92,8 +98,45 @@ struct Settings: Codable, Equatable {
         historyLimit: 50,
         retainAudio: true,
         audioCuesEnabled: true,
-        livePreviewEnabled: true
+        livePreviewEnabled: true,
+        advisoryParaphraseGuard: true
     )
+}
+
+extension Settings {
+    /// Decodes every field strictly except `advisoryParaphraseGuard`, which falls back to the default
+    /// when the file does not carry it.
+    ///
+    /// The general rule for this file stands: a file that will not decode is replaced by defaults,
+    /// because a background app must not die on a corrupt settings file. This one key is exempt
+    /// because it is the only key an already-written file can be missing, and treating that as
+    /// corruption would take the user's glossary with it: the measured six-term glossary would become
+    /// an empty one on the first launch after the field was added, which is worse dictation rather
+    /// than a reset toggle.
+    ///
+    /// Written in an extension rather than in the type's body so that the memberwise initialiser
+    /// survives; `Settings.default` and the tests are built with it.
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        pushToTalkChord = try container.decode(KeyChord.self, forKey: .pushToTalkChord)
+        toggleShortcut = try container.decode(KeyChord.self, forKey: .toggleShortcut)
+        cancelShortcut = try container.decode(KeyChord.self, forKey: .cancelShortcut)
+        promptToggleShortcut = try container.decode(KeyChord.self, forKey: .promptToggleShortcut)
+        glossaryTerms = try container.decode([String].self, forKey: .glossaryTerms)
+        transcriptionProvider = try container.decode(TranscriptionProvider.self, forKey: .transcriptionProvider)
+        transcriptionModelId = try container.decode(String.self, forKey: .transcriptionModelId)
+        cleanupModelId = try container.decode(String.self, forKey: .cleanupModelId)
+        cleanupEndpoint = try container.decode(String.self, forKey: .cleanupEndpoint)
+        rewriteEndpoint = try container.decode(String.self, forKey: .rewriteEndpoint)
+        autoInsert = try container.decode(Bool.self, forKey: .autoInsert)
+        historyLimit = try container.decode(Int.self, forKey: .historyLimit)
+        retainAudio = try container.decode(Bool.self, forKey: .retainAudio)
+        audioCuesEnabled = try container.decode(Bool.self, forKey: .audioCuesEnabled)
+        livePreviewEnabled = try container.decode(Bool.self, forKey: .livePreviewEnabled)
+        advisoryParaphraseGuard = try container.decodeIfPresent(Bool.self, forKey: .advisoryParaphraseGuard)
+            ?? Settings.default.advisoryParaphraseGuard
+    }
 }
 
 /// Failures persisting `Settings` to disk. Reading never throws: a missing or malformed file

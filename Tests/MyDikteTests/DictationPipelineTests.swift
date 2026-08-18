@@ -152,11 +152,11 @@ struct InsertionChoiceTests {
             raw: "bugün servisleri güncelledim",
             cleanup: .failed(reason: "HTTP 401: invalid api key"),
             glossary: [],
-            applyingParaphraseGuard: true
+            guardPolicy: .strict
         )
 
         #expect(choice.text == "bugün servisleri güncelledim")
-        #expect(choice.rejectionReason?.contains("HTTP 401") == true)
+        #expect(choice.message?.contains("HTTP 401") == true)
     }
 
     @Test("a paraphrase rejection inserts the raw transcript and carries the reason")
@@ -165,11 +165,11 @@ struct InsertionChoiceTests {
             raw: "Kubernetes üzerinde çalışan servisleri güncelledim",
             cleanup: .cleaned("Servisleri güncelledim."),
             glossary: ["Kubernetes"],
-            applyingParaphraseGuard: true
+            guardPolicy: .strict
         )
 
         #expect(choice.text == "Kubernetes üzerinde çalışan servisleri güncelledim")
-        #expect(choice.rejectionReason?.contains("Kubernetes") == true)
+        #expect(choice.message?.contains("Kubernetes") == true)
     }
 
     @Test("an accepted cleanup inserts the cleaned text with no reason")
@@ -178,11 +178,12 @@ struct InsertionChoiceTests {
             raw: "ıı bugün şey servisleri güncelledim yani",
             cleanup: .cleaned("Bugün servisleri güncelledim."),
             glossary: [],
-            applyingParaphraseGuard: true
+            guardPolicy: .strict
         )
 
         #expect(choice.text == "Bugün servisleri güncelledim.")
-        #expect(choice.rejectionReason == nil)
+        #expect(choice.message == nil)
+        #expect(choice.concern == nil)
     }
 
     @Test("the prompt-rewrite mode skips the guard, since an English rewrite shares no words")
@@ -191,11 +192,12 @@ struct InsertionChoiceTests {
             raw: "toplantıyı perşembeye alalım",
             cleanup: .cleaned("Move the meeting to Thursday and confirm the attendees."),
             glossary: [],
-            applyingParaphraseGuard: false
+            guardPolicy: .skipped
         )
 
         #expect(choice.text == "Move the meeting to Thursday and confirm the attendees.")
-        #expect(choice.rejectionReason == nil)
+        #expect(choice.message == nil)
+        #expect(choice.concern == nil)
     }
 
     /// A rejection reason quotes two word counts and nothing else, so without the candidate itself
@@ -208,7 +210,7 @@ struct InsertionChoiceTests {
             raw: "Kubernetes üzerinde çalışan servisleri güncelledim",
             cleanup: .cleaned("Servisleri güncelledim."),
             glossary: ["Kubernetes"],
-            applyingParaphraseGuard: true
+            guardPolicy: .strict
         )
 
         #expect(choice.rejectedCleanup == "Servisleri güncelledim.")
@@ -220,7 +222,7 @@ struct InsertionChoiceTests {
             raw: "bugün servisleri güncelledim",
             cleanup: .failed(reason: "HTTP 401: invalid api key"),
             glossary: [],
-            applyingParaphraseGuard: true
+            guardPolicy: .strict
         )
 
         #expect(choice.rejectedCleanup == nil)
@@ -232,10 +234,152 @@ struct InsertionChoiceTests {
             raw: "ıı bugün şey servisleri güncelledim yani",
             cleanup: .cleaned("Bugün servisleri güncelledim."),
             glossary: [],
-            applyingParaphraseGuard: true
+            guardPolicy: .strict
         )
 
         #expect(choice.rejectedCleanup == nil)
+    }
+
+    /// Every concern goes into the record as data, whichever policy is in force, so the ledger counts
+    /// the same terms in both modes and switching mode does not blind the counting.
+    @Test("a strict rejection also carries the concern structurally, not only as a sentence")
+    func strictRejectionCarriesTheConcern() {
+        let choice = InsertionChoice.resolve(
+            raw: "Kubernetes üzerinde çalışan servisleri güncelledim",
+            cleanup: .cleaned("Servisleri güncelledim."),
+            glossary: ["Kubernetes"],
+            guardPolicy: .strict
+        )
+
+        #expect(choice.concern?.kind == .droppedGlossaryTerm)
+        #expect(choice.concern?.term == "Kubernetes")
+        #expect(choice.insertedRawInstead == true)
+    }
+}
+
+/// Advisory mode, and the measurement behind it: over one day of real use this guard rejected three
+/// correct cleanups and caught no genuine paraphrase, and each rejected cleanup was lost to the user.
+/// So a concern now travels with the cleanup instead of replacing it, and strict mode stays reachable.
+@Suite("InsertionChoice advisory mode")
+struct InsertionChoiceAdvisoryTests {
+    /// The measured `optimize` case, verbatim from the user's own log: Whisper heard "optimizir",
+    /// the model repaired it, and the guard threw the whole cleanup away.
+    @Test("an advisory concern inserts the cleanup rather than the raw transcript")
+    func advisoryInsertsTheCleanup() {
+        let choice = InsertionChoice.resolve(
+            raw: "toplantıyı perşembeye alalım ve notları herkese gönderelim",
+            cleanup: .cleaned("Toplantıyı perşembeye alalım ve faturaları herkese gönderelim."),
+            glossary: [],
+            guardPolicy: .advisory
+        )
+
+        #expect(choice.text == "Toplantıyı perşembeye alalım ve faturaları herkese gönderelim.")
+        #expect(choice.insertedRawInstead == false)
+    }
+
+    @Test("an advisory concern is still detected, carried as data and surfaced as a sentence")
+    func advisoryConcernIsSurfaced() {
+        let choice = InsertionChoice.resolve(
+            raw: "toplantıyı perşembeye alalım ve notları herkese gönderelim",
+            cleanup: .cleaned("Toplantıyı perşembeye alalım ve faturaları herkese gönderelim."),
+            glossary: [],
+            guardPolicy: .advisory
+        )
+
+        #expect(choice.concern?.kind == .introducedWord)
+        #expect(choice.concern?.term == "faturaları")
+        #expect(choice.message?.contains("faturaları") == true)
+    }
+
+    /// Nothing was turned down, so there is no rejected candidate: the cleanup is at the caret, which
+    /// is the whole point of advisory mode and the reason `rejectedCleanup` stops being the only place
+    /// the text survives.
+    @Test("an advisory concern rejects nothing, so it keeps no rejected candidate")
+    func advisoryKeepsNoRejectedCandidate() {
+        let choice = InsertionChoice.resolve(
+            raw: "toplantıyı perşembeye alalım ve notları herkese gönderelim",
+            cleanup: .cleaned("Toplantıyı perşembeye alalım ve faturaları herkese gönderelim."),
+            glossary: [],
+            guardPolicy: .advisory
+        )
+
+        #expect(choice.rejectedCleanup == nil)
+    }
+
+    @Test("an accepted cleanup in advisory mode is silent, exactly as in strict mode")
+    func advisoryAcceptIsSilent() {
+        let choice = InsertionChoice.resolve(
+            raw: "ıı bugün şey servisleri güncelledim yani",
+            cleanup: .cleaned("Bugün servisleri güncelledim."),
+            glossary: [],
+            guardPolicy: .advisory
+        )
+
+        #expect(choice.text == "Bugün servisleri güncelledim.")
+        #expect(choice.message == nil)
+        #expect(choice.concern == nil)
+    }
+
+    /// Advisory is only about the guard. A cleanup that genuinely failed still inserts the raw
+    /// transcript and still reports the failure, which is the contract every other failure path in
+    /// the pipeline depends on.
+    @Test("a failed cleanup is unaffected by advisory mode")
+    func advisoryLeavesTheFailureContractAlone() {
+        let choice = InsertionChoice.resolve(
+            raw: "bugün servisleri güncelledim",
+            cleanup: .failed(reason: "HTTP 401: invalid api key"),
+            glossary: [],
+            guardPolicy: .advisory
+        )
+
+        #expect(choice.text == "bugün servisleri güncelledim")
+        #expect(choice.message?.contains("HTTP 401") == true)
+        #expect(choice.insertedRawInstead == true)
+        #expect(choice.concern == nil)
+    }
+
+    @Test("the same input under both policies differs only in what reaches the caret")
+    func policiesDifferOnlyInTheOutcome() {
+        let raw = "toplantıyı perşembeye alalım ve notları herkese gönderelim"
+        let cleaned = "Toplantıyı perşembeye alalım ve faturaları herkese gönderelim."
+
+        let advisory = InsertionChoice.resolve(raw: raw, cleanup: .cleaned(cleaned), glossary: [], guardPolicy: .advisory)
+        let strict = InsertionChoice.resolve(raw: raw, cleanup: .cleaned(cleaned), glossary: [], guardPolicy: .strict)
+
+        #expect(advisory.concern == strict.concern)
+        #expect(advisory.text == cleaned)
+        #expect(strict.text == raw)
+        #expect(strict.rejectedCleanup == cleaned)
+    }
+}
+
+/// Which policy a dictation runs under is resolved once per run, from the settings the run started
+/// with, in the same place every other per-run decision is resolved.
+@Suite("Paraphrase guard policy")
+struct GuardPolicyTests {
+    @Test("the default settings run the guard in advisory mode")
+    func defaultIsAdvisory() {
+        #expect(PipelineConfiguration(settings: .default).guardPolicy(for: .dictate) == .advisory)
+    }
+
+    @Test("turning advisory off restores strict mode, which is the way back the user asked for")
+    func advisoryOffIsStrict() {
+        var settings = Settings.default
+        settings.advisoryParaphraseGuard = false
+
+        #expect(PipelineConfiguration(settings: settings).guardPolicy(for: .dictate) == .strict)
+    }
+
+    /// Mode 2 rewrites Turkish into an English prompt, which shares almost no words with its input, so
+    /// the guard does not run there at all. That is independent of the advisory setting, in both
+    /// positions.
+    @Test("Mode 2 skips the guard whatever the advisory setting says")
+    func modeTwoSkipsTheGuard() {
+        var settings = Settings.default
+        #expect(PipelineConfiguration(settings: settings).guardPolicy(for: .prompt) == .skipped)
+
+        settings.advisoryParaphraseGuard = false
+        #expect(PipelineConfiguration(settings: settings).guardPolicy(for: .prompt) == .skipped)
     }
 }
 

@@ -3,13 +3,99 @@ import Foundation
 /// Guards against a cleanup model paraphrasing the user's own words instead of
 /// merely cleaning them: fixing punctuation and dropping fillers is welcome,
 /// rewording or translating is not. This is the last automated check before a
-/// cleaned transcript is inserted, so on any doubt it rejects and the pipeline
-/// falls back to the raw transcript.
+/// cleaned transcript is inserted.
+///
+/// It detects and reports; it does not decide what happens next. `InsertionChoice` owns that,
+/// because a day of real use measured this guard rejecting three correct cleanups and catching no
+/// genuine paraphrase at all, and the answer to that is a different policy after a concern rather
+/// than a weaker check before one.
 public enum ParaphraseGuard {
+    /// What concerned the guard, as data rather than as a sentence.
+    ///
+    /// The sentence is derived from this and never parsed back out of it. Recurring terms are
+    /// counted across `log.jsonl` (`GuardConcernLedger`), and a count taken by matching prose would
+    /// break silently the first time the wording changed.
+    public struct Concern: Codable, Equatable, Sendable {
+        /// Which of the guard's checks fired. Five cases for four checks: the word-count check has
+        /// two directions, and they are separate kinds because they mean opposite things (growth is
+        /// the model inventing text, shrinkage is the model dropping something it should not have)
+        /// and their sentences quote the counts differently.
+        public enum Kind: String, Codable, Equatable, Sendable, CaseIterable {
+            case emptyCleanup
+            case droppedGlossaryTerm
+            case grewBeyondTolerance
+            case droppedContent
+            case introducedWord
+        }
+
+        /// The two word counts behind a word-count concern, together rather than as two optionals
+        /// so that "one count without the other" cannot be expressed at all.
+        public struct WordCounts: Codable, Equatable, Sendable {
+            public let raw: Int
+            public let cleaned: Int
+
+            public init(raw: Int, cleaned: Int) {
+                self.raw = raw
+                self.cleaned = cleaned
+            }
+        }
+
+        public let kind: Kind
+        /// The single word at issue, spelled the way the text spelled it: the glossary term that
+        /// was dropped, or the word the cleanup introduced. `nil` for the concerns that are about
+        /// the whole utterance rather than one word.
+        ///
+        /// Spelling matters because this is what the ledger counts and what the user may add to the
+        /// glossary. The comparisons inside this file run on a folded form ("faturalari"), and
+        /// suggesting that spelling would put a misspelling in front of the recogniser.
+        public let term: String?
+        /// Non-nil exactly for `grewBeyondTolerance` and `droppedContent`.
+        public let wordCounts: WordCounts?
+
+        public init(kind: Kind, term: String? = nil, wordCounts: WordCounts? = nil) {
+            self.kind = kind
+            self.term = term
+            self.wordCounts = wordCounts
+        }
+
+        /// The user-facing sentence, built from the fields above.
+        ///
+        /// A concern read back from an older log line can arrive without its counts, since the log
+        /// is append-only and this shape is newer than some of its lines. The sentence then says
+        /// less rather than inventing a number.
+        public var sentence: String {
+            switch kind {
+            case .emptyCleanup:
+                return "Cleanup produced an empty result."
+            case .droppedGlossaryTerm:
+                guard let term else {
+                    return "A glossary term was dropped during cleanup."
+                }
+                return "Glossary term \"\(term)\" was dropped during cleanup."
+            case .grewBeyondTolerance:
+                guard let wordCounts else {
+                    return "Cleanup grew the text beyond what a cleanup does."
+                }
+                return "Cleanup grew the text from \(wordCounts.raw) words to \(wordCounts.cleaned)."
+            case .droppedContent:
+                guard let wordCounts else {
+                    return "Cleanup dropped content, not just fillers."
+                }
+                return "Cleanup dropped content, not just fillers: "
+                    + "\(wordCounts.raw) words became \(wordCounts.cleaned)."
+            case .introducedWord:
+                guard let term else {
+                    return "Cleanup introduced a word that was not spoken."
+                }
+                return "Cleanup introduced a word that was not spoken: \"\(term)\"."
+            }
+        }
+    }
+
     /// The outcome of comparing a raw transcript against its cleaned counterpart.
     public enum Result: Equatable {
         case accept
-        case reject(reason: String)
+        case concern(Concern)
     }
 
     /// Compares `raw` and `cleaned` and decides whether `cleaned` is safe to insert.
@@ -26,7 +112,7 @@ public enum ParaphraseGuard {
     ///     may drift by in either direction before it is treated as a rewrite
     ///     rather than a cleanup.
     /// - Returns: `.accept` when `cleaned` looks like a faithful cleanup of `raw`,
-    ///   `.reject(reason:)` with a user-facing reason otherwise.
+    ///   `.concern(Concern)` describing what was found otherwise.
     public static func check(
         raw: String,
         cleaned: String,
@@ -38,14 +124,14 @@ public enum ParaphraseGuard {
 
         // 1. Cleanup never produces nothing from something.
         if trimmedCleaned.isEmpty && !trimmedRaw.isEmpty {
-            return .reject(reason: "Cleanup produced an empty result.")
+            return .concern(Concern(kind: .emptyCleanup))
         }
 
         // 2. A dropped glossary term is the strongest paraphrase signal, since
         //    these are technical identifiers the user expects verbatim.
         for term in glossary where raw.localizedCaseInsensitiveContains(term) {
             if !cleaned.localizedCaseInsensitiveContains(term) {
-                return .reject(reason: "Glossary term \"\(term)\" was dropped during cleanup.")
+                return .concern(Concern(kind: .droppedGlossaryTerm, term: term))
             }
         }
 
@@ -61,19 +147,16 @@ public enum ParaphraseGuard {
         let rawWordCount = wordCount(of: trimmedRaw)
         let cleanedWordCount = wordCount(of: trimmedCleaned)
         if rawWordCount > 0 {
+            let counts = Concern.WordCounts(raw: rawWordCount, cleaned: cleanedWordCount)
+
             let upperBound = Double(rawWordCount) * (1 + wordCountTolerance)
             if Double(cleanedWordCount) > upperBound {
-                return .reject(
-                    reason: "Cleanup grew the text from \(rawWordCount) words to \(cleanedWordCount)."
-                )
+                return .concern(Concern(kind: .grewBeyondTolerance, wordCounts: counts))
             }
 
             let lowerBound = Double(rawWordCount) * (1 - wordCountTolerance)
             if Double(cleanedWordCount) < lowerBound, !removalsAreAllFillers(raw: trimmedRaw, cleaned: trimmedCleaned) {
-                return .reject(
-                    reason: "Cleanup dropped content, not just fillers: "
-                        + "\(rawWordCount) words became \(cleanedWordCount)."
-                )
+                return .concern(Concern(kind: .droppedContent, wordCounts: counts))
             }
         }
 
@@ -82,7 +165,14 @@ public enum ParaphraseGuard {
         //    cannot see by construction: the measured failure was Turkish "yine" becoming English
         //    "again" with the word count and every glossary term intact.
         if let introduced = introducedWord(raw: trimmedRaw, cleaned: trimmedCleaned, glossary: glossary) {
-            return .reject(reason: "Cleanup introduced a word that was not spoken: \"\(introduced)\".")
+            return .concern(
+                Concern(
+                    kind: .introducedWord,
+                    // Reported as the cleanup spelled it, not as the comparison folded it: this term
+                    // is what the ledger counts and what the user may put in the glossary.
+                    term: spellings(in: trimmedCleaned)[introduced] ?? introduced
+                )
+            )
         }
 
         return .accept
@@ -186,6 +276,26 @@ public enum ParaphraseGuard {
         TurkishFolding.normalise(text)
             .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
             .map(String.init)
+    }
+
+    /// Each folded stem in `text` mapped back to the spelling it came from, first occurrence wins.
+    ///
+    /// Every comparison in this file runs on folded stems, which is right for comparing and wrong for
+    /// reporting: a concern about "hâlâ" reported as "hala" would reach the glossary as a
+    /// misspelling. Built by folding each whitespace-separated token on its own, which produces
+    /// exactly the stems `stems(of:)` produces, since folding drops punctuation rather than splitting
+    /// on it. Leading and trailing punctuation is trimmed off the spelling, so a word at the end of a
+    /// sentence is not reported with its full stop attached.
+    private static func spellings(in text: String) -> [String: String] {
+        var spellings: [String: String] = [:]
+        for token in text.split(whereSeparator: { $0.isWhitespace }) {
+            let folded: String = TurkishFolding.normalise(String(token))
+            guard !folded.isEmpty, spellings[folded] == nil else {
+                continue
+            }
+            spellings[folded] = String(token).trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        }
+        return spellings
     }
 
     /// Whether `candidate` is close enough to `spoken` to be a repair of it rather than a replacement.

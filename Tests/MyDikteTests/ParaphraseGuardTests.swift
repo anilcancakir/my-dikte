@@ -59,6 +59,148 @@ struct ParaphraseGuardIntroducedWordTests {
     }
 }
 
+/// The guard reports what concerned it as data, and the user-facing sentence is derived from that
+/// data. Nothing ever parses the sentence back out: counting how often a term is flagged across the
+/// log has to survive a change of wording, and a prose reason cannot promise that.
+@Suite("ParaphraseGuard concerns as data")
+struct ParaphraseGuardConcernTests {
+    @Test("an empty cleanup is its own kind and has no term")
+    func emptyCleanupIsItsOwnKind() throws {
+        let concern = try Self.concern(
+            raw: "toplantıyı perşembeye alalım",
+            cleaned: "",
+            glossary: []
+        )
+
+        #expect(concern.kind == .emptyCleanup)
+        #expect(concern.term == nil)
+        #expect(concern.wordCounts == nil)
+    }
+
+    @Test("a dropped glossary term names the term, as the glossary spells it")
+    func droppedGlossaryTermNamesTheTerm() throws {
+        let concern = try Self.concern(
+            raw: "Kubernetes clusterını yeniden başlattım",
+            cleaned: "Cluster'ı yeniden başlattım.",
+            glossary: ["Kubernetes"]
+        )
+
+        #expect(concern.kind == .droppedGlossaryTerm)
+        #expect(concern.term == "Kubernetes")
+    }
+
+    @Test("growth past the tolerance is its own kind and carries both word counts")
+    func growthCarriesItsCounts() throws {
+        let concern = try Self.concern(
+            raw: "bir iki üç",
+            cleaned: "bir iki üç dört beş altı",
+            glossary: []
+        )
+
+        #expect(concern.kind == .grewBeyondTolerance)
+        #expect(concern.wordCounts == ParaphraseGuard.Concern.WordCounts(raw: 3, cleaned: 6))
+        #expect(concern.term == nil)
+    }
+
+    @Test("an unexplained shrinkage is its own kind and carries both word counts")
+    func shrinkageCarriesItsCounts() throws {
+        let concern = try Self.concern(
+            raw: "bir iki üç dört beş altı",
+            cleaned: "bir iki üç",
+            glossary: []
+        )
+
+        #expect(concern.kind == .droppedContent)
+        #expect(concern.wordCounts == ParaphraseGuard.Concern.WordCounts(raw: 6, cleaned: 3))
+    }
+
+    /// The term is what the ledger counts and what the user would add to the glossary, so it has to
+    /// arrive spelled the way the cleanup spelled it. The comparison inside the guard is done on a
+    /// folded form ("faturalari"), and handing that to the glossary would suggest a misspelling.
+    @Test("an introduced word names the word, spelled as the cleanup spelled it")
+    func introducedWordKeepsItsSpelling() throws {
+        let concern = try Self.concern(
+            raw: "toplantıyı perşembeye alalım ve notları herkese gönderelim",
+            cleaned: "toplantıyı perşembeye alalım ve faturaları herkese gönderelim",
+            glossary: []
+        )
+
+        #expect(concern.kind == .introducedWord)
+        #expect(concern.term == "faturaları")
+    }
+
+    @Test("the trailing punctuation of a flagged word is not part of the term")
+    func introducedWordDropsTrailingPunctuation() throws {
+        let concern = try Self.concern(
+            raw: "toplantıyı perşembeye alalım ve notları herkese gönderelim",
+            cleaned: "toplantıyı perşembeye alalım ve herkese gönderelim faturaları.",
+            glossary: []
+        )
+
+        #expect(concern.term == "faturaları")
+    }
+
+    @Test("the four checks report four different kinds, so a reader never has to tell them apart by wording")
+    func checksMapToDistinctKinds() throws {
+        let kinds: [ParaphraseGuard.Concern.Kind] = [
+            try Self.concern(raw: "toplantıyı perşembeye alalım", cleaned: "", glossary: []).kind,
+            try Self.concern(
+                raw: "Kubernetes clusterını yeniden başlattım",
+                cleaned: "Cluster'ı yeniden başlattım.",
+                glossary: ["Kubernetes"]
+            ).kind,
+            try Self.concern(raw: "bir iki üç", cleaned: "bir iki üç dört beş altı", glossary: []).kind,
+            try Self.concern(raw: "bir iki üç dört beş altı", cleaned: "bir iki üç", glossary: []).kind,
+            try Self.concern(
+                raw: "toplantıyı perşembeye alalım ve notları herkese gönderelim",
+                cleaned: "toplantıyı perşembeye alalım ve faturaları herkese gönderelim",
+                glossary: []
+            ).kind,
+        ]
+
+        #expect(Set(kinds).count == kinds.count)
+    }
+
+    @Test("the user-facing sentence is built from the data, term and counts included")
+    func sentenceIsBuiltFromTheData() throws {
+        let introduced = try Self.concern(
+            raw: "toplantıyı perşembeye alalım ve notları herkese gönderelim",
+            cleaned: "toplantıyı perşembeye alalım ve faturaları herkese gönderelim",
+            glossary: []
+        )
+        let shrunk = try Self.concern(raw: "bir iki üç dört beş altı", cleaned: "bir iki üç", glossary: [])
+
+        #expect(introduced.sentence.contains("\"faturaları\""))
+        #expect(shrunk.sentence.contains("6 words became 3"))
+    }
+
+    /// The log is append-only, so a concern written by an older build can arrive without its counts.
+    /// The sentence then says less rather than inventing a number.
+    @Test("a concern with no counts still produces a sentence")
+    func sentenceSurvivesMissingCounts() {
+        let concern = ParaphraseGuard.Concern(kind: .droppedContent)
+
+        #expect(concern.sentence.isEmpty == false)
+        #expect(concern.sentence.contains("words became") == false)
+    }
+
+    private static func concern(
+        raw: String,
+        cleaned: String,
+        glossary: [String]
+    ) throws -> ParaphraseGuard.Concern {
+        let result = ParaphraseGuard.check(raw: raw, cleaned: cleaned, glossary: glossary)
+        guard case .concern(let concern) = result else {
+            throw ConcernExpectationFailure.accepted
+        }
+        return concern
+    }
+
+    private enum ConcernExpectationFailure: Error {
+        case accepted
+    }
+}
+
 @Suite("ParaphraseGuard")
 struct ParaphraseGuardTests {
     @Test("a clean removal of fillers is accepted")
@@ -78,8 +220,8 @@ struct ParaphraseGuardTests {
             cleaned: "Cluster'ı yeniden başlattım.",
             glossary: ["Kubernetes"]
         )
-        guard case .reject = result else {
-            Issue.record("expected .reject, got \(result)")
+        guard case .concern = result else {
+            Issue.record("expected .concern, got \(result)")
             return
         }
     }
@@ -91,8 +233,8 @@ struct ParaphraseGuardTests {
             cleaned: "bir iki üç",
             glossary: []
         )
-        guard case .reject = result else {
-            Issue.record("expected .reject, got \(result)")
+        guard case .concern = result else {
+            Issue.record("expected .concern, got \(result)")
             return
         }
     }
@@ -104,8 +246,8 @@ struct ParaphraseGuardTests {
             cleaned: "bir iki üç dört beş altı",
             glossary: []
         )
-        guard case .reject = result else {
-            Issue.record("expected .reject, got \(result)")
+        guard case .concern = result else {
+            Issue.record("expected .concern, got \(result)")
             return
         }
     }
@@ -117,8 +259,8 @@ struct ParaphraseGuardTests {
             cleaned: "",
             glossary: []
         )
-        guard case .reject = result else {
-            Issue.record("expected .reject, got \(result)")
+        guard case .concern = result else {
+            Issue.record("expected .concern, got \(result)")
             return
         }
     }
@@ -248,8 +390,8 @@ struct ParaphraseGuardTests {
         let raw = "dosyayı komit ettim ve sonra pushladım hepsini"
         let cleaned = "Dosyayı commit ettim ve sonra pushladım hepsini."
 
-        guard case .reject = ParaphraseGuard.check(raw: raw, cleaned: cleaned, glossary: []) else {
-            Issue.record("expected .reject without a glossary")
+        guard case .concern = ParaphraseGuard.check(raw: raw, cleaned: cleaned, glossary: []) else {
+            Issue.record("expected .concern without a glossary")
             return
         }
         #expect(ParaphraseGuard.check(raw: raw, cleaned: cleaned, glossary: ["commit"]) == .accept)
@@ -265,8 +407,8 @@ struct ParaphraseGuardTests {
             cleaned: "again aynı hatayı aldım ve bütün testleri baştan çalıştırdım",
             glossary: []
         )
-        guard case .reject = result else {
-            Issue.record("expected .reject, got \(result)")
+        guard case .concern = result else {
+            Issue.record("expected .concern, got \(result)")
             return
         }
     }
@@ -278,8 +420,8 @@ struct ParaphraseGuardTests {
             cleaned: "toplantıyı perşembeye alalım ve faturaları herkese gönderelim",
             glossary: []
         )
-        guard case .reject = result else {
-            Issue.record("expected .reject, got \(result)")
+        guard case .concern = result else {
+            Issue.record("expected .concern, got \(result)")
             return
         }
     }
@@ -307,8 +449,8 @@ struct ParaphraseGuardTests {
     )
     func shortContentWordSubstitutionIsRejected(raw: String, cleaned: String) {
         let result = ParaphraseGuard.check(raw: raw, cleaned: cleaned, glossary: [])
-        guard case .reject = result else {
-            Issue.record("expected .reject, got \(result)")
+        guard case .concern = result else {
+            Issue.record("expected .concern, got \(result)")
             return
         }
     }

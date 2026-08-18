@@ -315,6 +315,9 @@ private struct GlossaryPane: View {
     let onChange: () -> Void
 
     @State private var text = ""
+    /// Recounted from `log.jsonl` on appear and after every edit, so a term added here leaves the
+    /// list immediately instead of being offered again.
+    @State private var candidates: [GuardConcernLedger.Candidate] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -334,12 +337,83 @@ private struct GlossaryPane: View {
                         .map { $0.trimmingCharacters(in: .whitespaces) }
                         .filter { !$0.isEmpty }
                     onChange()
+                    candidates = GuardConcernLedger.candidates(glossaryTerms: settings.glossaryTerms)
                 }
+
+            Divider()
+            suggestions
         }
         .padding(.top, 12)
         .onAppear {
             text = settings.glossaryTerms.joined(separator: "\n")
+            candidates = GuardConcernLedger.candidates(glossaryTerms: settings.glossaryTerms)
         }
+    }
+
+    /// The words the cleanup guard keeps flagging, most often first, each with a single button that
+    /// adds it. Deliberately one button per term and no "add all": adding every suggestion is exactly
+    /// the long glossary the caption above measures as worse, so the choice has to stay per term.
+    private var suggestions: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Suggested from your own dictations")
+                .font(.caption.weight(.semibold))
+
+            if candidates.isEmpty {
+                Text("Nothing to suggest yet. A word appears here once the cleanup guard has had "
+                    + "something to say about it.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(candidates) { candidate in
+                            SuggestionRow(candidate: candidate) { add(candidate.term) }
+                        }
+                    }
+                }
+                .frame(maxHeight: 96)
+            }
+
+            Text("Counted from the times the paraphrase guard flagged a word in log.jsonl, ranked by "
+                + "how often. These are suggestions and nothing is ever added for you: a longer "
+                + "glossary measured worse on this machine, so which of these is worth its place is "
+                + "your call, one at a time.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// Adds one term through the text field the pane already writes through, so there is exactly one
+    /// path from this pane to `Settings.save` and the editor cannot end up disagreeing with the file.
+    private func add(_ term: String) {
+        guard !settings.glossaryTerms.contains(term) else {
+            return
+        }
+        text = (settings.glossaryTerms + [term]).joined(separator: "\n")
+    }
+}
+
+private struct SuggestionRow: View {
+    let candidate: GuardConcernLedger.Candidate
+    let onAdd: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(candidate.term)
+                .font(.system(.body, design: .monospaced))
+            Text(summary)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+            Button("Add", action: onAdd)
+                .controlSize(.small)
+        }
+    }
+
+    private var summary: String {
+        let times: String = candidate.count == 1 ? "once" : "\(candidate.count) times"
+        return "\(times), last on \(candidate.lastSeen.formatted(date: .abbreviated, time: .omitted))"
     }
 }
 
@@ -518,6 +592,19 @@ private struct BehaviourPane: View {
 
             Toggle("Show the words as you speak (on device)", isOn: $settings.livePreviewEnabled)
                 .onChange(of: settings.livePreviewEnabled) { _, _ in onChange() }
+
+            Toggle("Insert the cleanup even when the guard has a concern", isOn: $settings.advisoryParaphraseGuard)
+                .onChange(of: settings.advisoryParaphraseGuard) { _, _ in onChange() }
+
+            Text("The paraphrase guard watches for a cleanup that rewrote you instead of cleaning you "
+                + "up. On, it inserts the cleanup anyway and shows what concerned it, and the word it "
+                + "flagged becomes a glossary suggestion on the Glossary pane. Off, it throws that "
+                + "cleanup away and inserts the raw transcript instead. On by default from measurement: "
+                + "over one day of real use it turned down three correct cleanups and caught no genuine "
+                + "rewrite.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
             Text("The live preview is Apple's on-device Turkish recogniser, so no audio leaves the "
                 + "machine and it costs no API call. It has no punctuation and is thrown away: the "
