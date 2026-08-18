@@ -296,6 +296,28 @@ struct PipelineConfigurationTests {
         #expect(honoured.chatEndpoint(for: .dictate) == "https://openrouter.ai/api/v1/chat/completions")
     }
 
+    /// The endpoint that used to be the default is now just another endpoint. While OpenAI's URL was
+    /// the default value, resolution could not tell "nobody touched this field" from "the user chose
+    /// OpenAI", and the untouched reading won: the pane displayed an OpenAI endpoint, every request
+    /// went to Groq, and choosing OpenAI on purpose was impossible to express.
+    @Test("an explicitly typed OpenAI endpoint is honoured rather than rewritten to Groq")
+    func explicitOpenAIEndpointIsHonoured() {
+        var chosen = Settings.default
+        chosen.cleanupEndpoint = "https://api.openai.com/v1/chat/completions"
+
+        let configuration = PipelineConfiguration(settings: chosen)
+        #expect(configuration.chatEndpoint(for: .dictate) == "https://api.openai.com/v1/chat/completions")
+    }
+
+    @Test("whitespace alone counts as untouched, so a stray space does not become the endpoint")
+    func whitespaceEndpointResolvesToTheDefault() {
+        var chosen = Settings.default
+        chosen.cleanupEndpoint = "   "
+
+        let configuration = PipelineConfiguration(settings: chosen)
+        #expect(configuration.chatEndpoint(for: .dictate) == PipelineConfiguration.groqChatEndpoint)
+    }
+
     @Test("the Keychain account follows the endpoint host, never a silent fallback to the other key")
     func keychainAccountFollowsTheEndpoint() {
         #expect(

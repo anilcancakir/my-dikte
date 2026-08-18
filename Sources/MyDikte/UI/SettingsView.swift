@@ -369,11 +369,19 @@ private struct ModelsPane: View {
             )
             .onChange(of: settings.cleanupModelId) { _, _ in onChange() }
 
-            TextField("Cleanup endpoint", text: $settings.cleanupEndpoint)
-                .onChange(of: settings.cleanupEndpoint) { _, _ in onChange() }
+            TextField(
+                "Cleanup endpoint",
+                text: $settings.cleanupEndpoint,
+                prompt: Text(PipelineConfiguration.groqChatEndpoint)
+            )
+            .onChange(of: settings.cleanupEndpoint) { _, _ in onChange() }
 
-            TextField("Rewrite endpoint", text: $settings.rewriteEndpoint)
-                .onChange(of: settings.rewriteEndpoint) { _, _ in onChange() }
+            TextField(
+                "Rewrite endpoint",
+                text: $settings.rewriteEndpoint,
+                prompt: Text(PipelineConfiguration.groqChatEndpoint)
+            )
+            .onChange(of: settings.rewriteEndpoint) { _, _ in onChange() }
 
             // The stored endpoint and the endpoint used are not the same string, and showing only
             // the stored one made this pane read as misconfigured: it says api.openai.com while the

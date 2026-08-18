@@ -93,12 +93,17 @@ struct PipelineConfiguration: Sendable, Equatable {
         return trimmed.isEmpty ? fallback : trimmed
     }
 
+    /// An empty endpoint means "use the default", exactly like an empty model id.
+    ///
+    /// This used to also rewrite any value equal to `Settings.default.cleanupEndpoint`, which was
+    /// then an OpenAI URL. That made two different things indistinguishable: a field nobody had
+    /// touched, and a user who had deliberately typed OpenAI. The untouched default won, so the
+    /// pane displayed an OpenAI endpoint while every request went to Groq, and choosing OpenAI on
+    /// purpose was impossible to express. The default is now empty, so a typed endpoint is honoured
+    /// as typed.
     private static func resolvedEndpoint(_ value: String) -> String {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed != Settings.default.cleanupEndpoint else {
-            return groqChatEndpoint
-        }
-        return trimmed
+        return trimmed.isEmpty ? groqChatEndpoint : trimmed
     }
 }
 
