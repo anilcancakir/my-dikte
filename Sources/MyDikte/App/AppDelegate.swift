@@ -4,7 +4,8 @@ import AppKit
 /// actor, per this project's concurrency convention for UI-owning types.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private var statusItem: NSStatusItem?
+    private var statusItemController: StatusItemController?
+    private var settingsWindowController: SettingsWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Info.plist's LSUIElement only governs the process LaunchServices started; setting the
@@ -34,22 +35,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DebugMenuOutput.register()
     }
 
+    /// Builds the real status item (Step 15) and its settings window, then wires the one seam
+    /// that exists inside this same step: Settings. The Start/Stop, Cancel, History and
+    /// Launch-at-Login seams stay on their logging no-op defaults until Steps 16 and 17 land.
     private func setUpStatusItem() {
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        let windowController = SettingsWindowController()
+        settingsWindowController = windowController
 
-        if let button = item.button {
-            button.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "MyDikte")
-            button.image?.isTemplate = true
+        let controller = StatusItemController()
+        controller.onOpenSettings = { [weak windowController] in
+            windowController?.show()
         }
-
-        let menu = NSMenu()
-        if let debugMenuItem = DebugMenu.buildMenuItem() {
-            menu.addItem(debugMenuItem)
-            menu.addItem(.separator())
-        }
-        menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
-        item.menu = menu
-
-        statusItem = item
+        controller.installDebugMenuItem(DebugMenu.buildMenuItem())
+        statusItemController = controller
     }
 }
