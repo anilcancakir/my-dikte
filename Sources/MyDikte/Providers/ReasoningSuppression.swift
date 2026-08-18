@@ -20,12 +20,16 @@ enum ReasoningSuppression {
     /// plus any additional body keys the provider needs to fully silence the trace.
     struct Parameters: Equatable {
         /// The value to send as `reasoning_effort` (or, for Gemini, the thinking level string).
-        let reasoningEffort: String
+        ///
+        /// Optional, because at least one provider needs the body flag **without** an effort
+        /// value: sending both to Groq's GPT-OSS empties the response entirely. See
+        /// `groqGPTOSSHiddenReasoningModels`.
+        let reasoningEffort: String?
         /// Extra top-level body keys beyond `reasoning_effort`, such as Groq's
         /// `include_reasoning: false`.
         let extraBodyParameters: [String: Bool]
 
-        init(reasoningEffort: String, extraBodyParameters: [String: Bool] = [:]) {
+        init(reasoningEffort: String?, extraBodyParameters: [String: Bool] = [:]) {
             self.reasoningEffort = reasoningEffort
             self.extraBodyParameters = extraBodyParameters
         }
@@ -58,10 +62,21 @@ enum ReasoningSuppression {
         "gpt-5.6",
     ]
 
-    /// Groq GPT-OSS models have no true "none"; the lowest effort plus a provider-specific flag
-    /// is what actually strips the `reasoning` field from the response, confirmed against the
-    /// live API in `.ac/plans/my-dikte-swift-macos/evidence/step-02-groq-seam.txt` section C.
-    private static let groqGPTOSSMinimumReasoningModels: Set<String> = [
+    /// Groq GPT-OSS models take `include_reasoning: false` **and nothing else**.
+    ///
+    /// The reference prescribes the lowest effort plus that flag together, and this table did too
+    /// until the pair was measured against the live API on `openai/gpt-oss-120b`:
+    ///
+    ///     reasoning_effort=low + include_reasoning=false -> content    0 chars, reasoning    0
+    ///     reasoning_effort=low alone                     -> content   55 chars, reasoning  582
+    ///     include_reasoning=false alone                  -> content  144 chars, reasoning    0
+    ///     neither                                        -> content  135 chars, reasoning 2726
+    ///
+    /// So the pair does not merely hide the trace, it silences the answer: `finish_reason` comes
+    /// back `stop` with an empty `content` and no error, which is the worst possible failure shape.
+    /// It was caught because Mode 2 produced nothing at all in the running app. The flag alone is
+    /// strictly the best row in that table: the most content of any variant, and no trace.
+    private static let groqGPTOSSHiddenReasoningModels: Set<String> = [
         "openai/gpt-oss-120b",
         "openai/gpt-oss-20b",
     ]
@@ -81,8 +96,8 @@ enum ReasoningSuppression {
         if openAINoneReasoningModels.contains(modelId) {
             return Parameters(reasoningEffort: "none")
         }
-        if groqGPTOSSMinimumReasoningModels.contains(modelId) {
-            return Parameters(reasoningEffort: "low", extraBodyParameters: ["include_reasoning": false])
+        if groqGPTOSSHiddenReasoningModels.contains(modelId) {
+            return Parameters(reasoningEffort: nil, extraBodyParameters: ["include_reasoning": false])
         }
         return nil
     }

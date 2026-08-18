@@ -141,18 +141,25 @@ final class ShortcutCoordinator: @unchecked Sendable {
         case toggleRequested
         /// The keyed cancel shortcut fired.
         case cancelRequested
+        /// The keyed Mode 2 shortcut fired: start or stop a dictation that is rewritten into an
+        /// English prompt rather than cleaned up. Added after Step 17 shipped, because the pipeline
+        /// supported Mode 2 from the start (`toggleRequested(mode:)`) while nothing could trigger
+        /// it: a requested feature was reachable only from the debug menu.
+        case promptToggleRequested
     }
 
-    /// The two keyed shortcuts, whose ids travel through Carbon.
+    /// The keyed shortcuts, whose ids travel through Carbon.
     enum KeyedAction: UInt32, Sendable {
         case toggle = 1
         case cancel = 2
+        case promptToggle = 3
     }
 
     struct Configuration: Sendable {
         var chord: Chord
         var toggle: CarbonHotkey.Binding
         var cancel: CarbonHotkey.Binding
+        var promptToggle: CarbonHotkey.Binding
         var minimumHoldSeconds: TimeInterval
         var abandonWindowSeconds: TimeInterval
 
@@ -162,12 +169,14 @@ final class ShortcutCoordinator: @unchecked Sendable {
             chord: Chord = .default,
             toggle: CarbonHotkey.Binding = Binding.defaultToggle,
             cancel: CarbonHotkey.Binding = Binding.defaultCancel,
+            promptToggle: CarbonHotkey.Binding = Binding.defaultPromptToggle,
             minimumHoldSeconds: TimeInterval = ShortcutCoordinator.minimumHoldSeconds,
             abandonWindowSeconds: TimeInterval = ShortcutCoordinator.abandonWindowSeconds
         ) {
             self.chord = chord
             self.toggle = toggle
             self.cancel = cancel
+            self.promptToggle = promptToggle
             self.minimumHoldSeconds = minimumHoldSeconds
             self.abandonWindowSeconds = abandonWindowSeconds
         }
@@ -184,6 +193,11 @@ final class ShortcutCoordinator: @unchecked Sendable {
             /// the key away from every app in the session.
             static let defaultCancel = CarbonHotkey.Binding(
                 keyCode: UInt32(kVK_ANSI_C),
+                modifiers: UInt32(controlKey | optionKey)
+            )
+            /// Control-Option-P, for "prompt": Mode 2, the dictation that becomes an English prompt.
+            static let defaultPromptToggle = CarbonHotkey.Binding(
+                keyCode: UInt32(kVK_ANSI_P),
                 modifiers: UInt32(controlKey | optionKey)
             )
         }
@@ -246,6 +260,7 @@ final class ShortcutCoordinator: @unchecked Sendable {
         }
         try carbon.register(configuration.toggle, id: KeyedAction.toggle.rawValue)
         try carbon.register(configuration.cancel, id: KeyedAction.cancel.rawValue)
+        try carbon.register(configuration.promptToggle, id: KeyedAction.promptToggle.rawValue)
         self.carbon = carbon
 
         let listener = EventTapListener(
@@ -301,6 +316,8 @@ final class ShortcutCoordinator: @unchecked Sendable {
             emit([.toggleRequested])
         case .cancel:
             emit([.cancelRequested])
+        case .promptToggle:
+            emit([.promptToggleRequested])
         }
     }
 
@@ -371,6 +388,7 @@ extension ShortcutCoordinator.Event {
         case .chordAbandoned: return "chordAbandoned"
         case .toggleRequested: return "toggleRequested"
         case .cancelRequested: return "cancelRequested"
+        case .promptToggleRequested: return "promptToggleRequested"
         }
     }
 }

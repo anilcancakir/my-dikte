@@ -49,18 +49,33 @@ struct ReasoningSuppressionTests {
         #expect(parameters == ReasoningSuppression.Parameters(reasoningEffort: "none"))
     }
 
-    @Test("namespaced openai/gpt-oss-120b yields both low and include_reasoning false")
-    func namespacedGptOss120bYieldsLowAndIncludeReasoningFalse() {
+    // The two tests below pinned `reasoningEffort == "low"` until the pair was measured against
+    // the live API: `reasoning_effort=low` plus `include_reasoning=false` returns `finish_reason`
+    // `stop` with an **empty** `content` and no error, which is how Mode 2 came to produce nothing
+    // at all in the running app. The flag alone returns the most content of any variant and no
+    // trace, so no effort value is sent for these models. Table in `ReasoningSuppression`.
+
+    @Test("namespaced openai/gpt-oss-120b yields include_reasoning false and NO reasoning effort")
+    func namespacedGptOss120bYieldsIncludeReasoningFalseOnly() {
         let parameters = ReasoningSuppression.parameters(for: "openai/gpt-oss-120b")
-        #expect(parameters?.reasoningEffort == "low")
+        #expect(parameters?.reasoningEffort == nil)
         #expect(parameters?.extraBodyParameters == ["include_reasoning": false])
     }
 
-    @Test("namespaced openai/gpt-oss-20b yields both low and include_reasoning false")
-    func namespacedGptOss20bYieldsLowAndIncludeReasoningFalse() {
+    @Test("namespaced openai/gpt-oss-20b yields include_reasoning false and NO reasoning effort")
+    func namespacedGptOss20bYieldsIncludeReasoningFalseOnly() {
         let parameters = ReasoningSuppression.parameters(for: "openai/gpt-oss-20b")
-        #expect(parameters?.reasoningEffort == "low")
+        #expect(parameters?.reasoningEffort == nil)
         #expect(parameters?.extraBodyParameters == ["include_reasoning": false])
+    }
+
+    @Test("sending an effort value alongside the flag is what emptied the response, so it is gone")
+    func noGroqModelSendsBothSuppressionParameters() {
+        for modelId in ["openai/gpt-oss-120b", "openai/gpt-oss-20b"] {
+            let parameters = ReasoningSuppression.parameters(for: modelId)
+            let sendsBoth = parameters?.reasoningEffort != nil && !(parameters?.extraBodyParameters.isEmpty ?? true)
+            #expect(sendsBoth == false)
+        }
     }
 
     @Test("the bare, unnamespaced gpt-oss-120b is treated as unknown and yields nothing")
