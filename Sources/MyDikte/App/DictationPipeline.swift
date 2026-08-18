@@ -23,16 +23,27 @@ struct PipelineConfiguration: Sendable, Equatable {
     /// The same Groq key serves both stages and both stages share one warm TLS connection.
     static let groqChatEndpoint = "https://api.groq.com/openai/v1/chat/completions"
 
-    static let minimumReplyTokens = 768
-    static let maximumReplyTokens = 2048
+    /// Raised from 768 after a real dictation lost its cleanup to this number.
+    ///
+    /// A 23-word Turkish transcript returned empty content in the app, and the same request measured
+    /// directly spent **717, 596 and 580** completion tokens on three runs against a 768 budget. The
+    /// answer itself is about 50 tokens; the rest is reasoning the reply never shows. So 768 was not
+    /// generous, it was 51 tokens from the ceiling, and any run that thought slightly longer produced
+    /// nothing at all. The floor now clears the worst observed reasoning by roughly twice over.
+    ///
+    /// Raising it is close to free: `max_tokens` is a ceiling and not a charge, so nothing is spent
+    /// unless the model actually generates. The reason the budget is bounded at all is a runaway
+    /// reply, which 2048 still prevents.
+    static let minimumReplyTokens = 1536
+    static let maximumReplyTokens = 3072
 
     /// Headroom for tokens the reply never shows. `openai/gpt-oss-120b` has no true "none" for
     /// reasoning effort, so it always thinks first and those tokens count against `max_tokens`.
-    /// Measured here: a 22-word Turkish transcript with a 132-token budget came back HTTP 200 with
-    /// an empty `content`, because the whole budget went on reasoning that `include_reasoning:
-    /// false` then stripped. The reply looked like a provider failure and cost a dictation's
-    /// cleanup.
-    static let reasoningHeadroomTokens = 512
+    /// Measured twice, and the second measurement is why this doubled: a 22-word transcript with a
+    /// 132-token budget came back HTTP 200 with empty `content`, and later a 23-word one did the same
+    /// at 768 while spending up to 717 completion tokens on reasoning alone. Reasoning cost does not
+    /// scale with input length the way the answer does, so this is a flat allowance and a large one.
+    static let reasoningHeadroomTokens = 1024
 
     let provider: Settings.TranscriptionProvider
     let transcriptionModelId: String

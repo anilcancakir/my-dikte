@@ -353,6 +353,22 @@ struct PipelineConfigurationTests {
         #expect(measuredCase >= PipelineConfiguration.reasoningHeadroomTokens)
         #expect(measuredCase > 132)
     }
+
+    /// The second measured loss, and the reason the floor moved. A real 23-word Turkish dictation
+    /// returned empty content, and the identical request measured directly spent 717, 596 and 580
+    /// completion tokens across three runs against the 768 budget in force at the time. The answer is
+    /// about 50 tokens of that, so the old floor sat 51 tokens from the ceiling and any run that
+    /// reasoned slightly longer produced nothing at all.
+    @Test("a real 23-word dictation clears the worst reasoning cost observed for it")
+    func budgetClearsMeasuredReasoningForARealDictation() {
+        let transcript = String(repeating: "kelime ", count: 23)
+        let budget = PipelineConfiguration.maxTokens(forTranscript: transcript)
+
+        let worstObservedCompletion = 717
+        #expect(budget > worstObservedCompletion)
+        // Not merely past it: past it with room, since 768 failed while sitting 51 tokens clear.
+        #expect(budget >= worstObservedCompletion * 2)
+    }
 }
 
 /// A quality-gate rejection reports a log-probability, which is the right thing to record and the
