@@ -318,7 +318,12 @@ private struct GlossaryPane: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("One term per line. This is the exact list sent as the transcription prompt and the cleanup vocabulary block.")
+            Text("One term per line. This is the exact list sent as the transcription prompt and the "
+                + "cleanup vocabulary block. Keep it short and keep it relevant: measured on this "
+                + "machine, the same recording came back with \"LLM-friendly\" correct under six "
+                + "focused terms and lost it under nineteen. Whisper reads this field as text preceding "
+                + "the audio, so unrelated terms crowd out the ones that matter rather than sitting "
+                + "harmlessly beside them. Add a term because you say it often, not in case you might.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             TextEditor(text: $text)
