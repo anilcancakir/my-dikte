@@ -1,0 +1,711 @@
+import AppKit
+import Foundation
+import os
+
+/// One dictation's worth of resolved settings, read once when recording starts so that a settings
+/// change takes effect on the next dictation and never mid-flight.
+///
+/// It resolves two things `Settings` leaves open. An empty model id means "not configured", not
+/// "send an empty model", so it falls back to the two models this plan actually measured. And the
+/// chat endpoint has exactly two supported providers with exactly one Keychain account each
+/// (`cleanup-groq`, `cleanup-openrouter`), so an endpoint that is still on `Settings`' untouched
+/// default (`api.openai.com`, written before the plan's Wave 1 amendment moved cleanup to Groq)
+/// resolves to Groq rather than authenticating against a key that cannot exist.
+struct PipelineConfiguration: Sendable, Equatable {
+    /// Measured on this machine at 0.38 to 0.66 s warm, and the more accurate model on Turkish
+    /// (`evidence/step-02-groq-seam.txt`).
+    static let defaultTranscriptionModelId = "whisper-large-v3"
+
+    /// A starting default rather than a finished decision; the follow-on plan picks the winner from
+    /// the log this pipeline writes.
+    static let defaultCleanupModelId = "openai/gpt-oss-120b"
+
+    /// The same Groq key serves both stages and both stages share one warm TLS connection.
+    static let groqChatEndpoint = "https://api.groq.com/openai/v1/chat/completions"
+
+    static let minimumReplyTokens = 768
+    static let maximumReplyTokens = 2048
+
+    /// Headroom for tokens the reply never shows. `openai/gpt-oss-120b` has no true "none" for
+    /// reasoning effort, so it always thinks first and those tokens count against `max_tokens`.
+    /// Measured here: a 22-word Turkish transcript with a 132-token budget came back HTTP 200 with
+    /// an empty `content`, because the whole budget went on reasoning that `include_reasoning:
+    /// false` then stripped. The reply looked like a provider failure and cost a dictation's
+    /// cleanup.
+    static let reasoningHeadroomTokens = 512
+
+    let provider: Settings.TranscriptionProvider
+    let transcriptionModelId: String
+    let cleanupModelId: String
+    let glossaryTerms: [String]
+    let autoInsert: Bool
+    let retainAudio: Bool
+    let historyLimit: Int
+    let audioCuesEnabled: Bool
+
+    private let cleanupEndpoint: String
+    private let rewriteEndpoint: String
+
+    init(settings: Settings) {
+        provider = settings.transcriptionProvider
+        transcriptionModelId = Self.resolved(settings.transcriptionModelId, default: Self.defaultTranscriptionModelId)
+        cleanupModelId = Self.resolved(settings.cleanupModelId, default: Self.defaultCleanupModelId)
+        glossaryTerms = settings.glossaryTerms
+        autoInsert = settings.autoInsert
+        retainAudio = settings.retainAudio
+        historyLimit = settings.historyLimit
+        audioCuesEnabled = settings.audioCuesEnabled
+        cleanupEndpoint = Self.resolvedEndpoint(settings.cleanupEndpoint)
+        rewriteEndpoint = Self.resolvedEndpoint(settings.rewriteEndpoint)
+    }
+
+    func chatEndpoint(for mode: DictationRecord.Mode) -> String {
+        switch mode {
+        case .dictate:
+            return cleanupEndpoint
+        case .prompt:
+            return rewriteEndpoint
+        }
+    }
+
+    func chatKeychainAccount(for mode: DictationRecord.Mode) -> String {
+        Self.chatKeychainAccount(forEndpoint: chatEndpoint(for: mode))
+    }
+
+    /// The account the configured endpoint's key lives under. Named per provider so switching
+    /// endpoints never reads the other provider's key, which would fail with an authentication
+    /// error that says nothing about the real cause.
+    static func chatKeychainAccount(forEndpoint endpoint: String) -> String {
+        endpoint.contains("openrouter.ai") ? "cleanup-openrouter" : "cleanup-groq"
+    }
+
+    /// Sized to the input rather than left open: an unbounded reply budget on a reasoning-capable
+    /// model is how a cleanup call turns into a 90-second one. Six tokens per spoken word covers
+    /// Turkish morphology plus the Mode 2 rewrite, which is legitimately longer than its input, and
+    /// the headroom above covers the reasoning the reply never shows.
+    static func maxTokens(forTranscript transcript: String) -> Int {
+        let words = transcript.split(whereSeparator: { $0.isWhitespace }).count
+        return min(maximumReplyTokens, max(minimumReplyTokens, words * 6 + reasoningHeadroomTokens))
+    }
+
+    private static func resolved(_ value: String, default fallback: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? fallback : trimmed
+    }
+
+    private static func resolvedEndpoint(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != Settings.default.cleanupEndpoint else {
+            return groqChatEndpoint
+        }
+        return trimmed
+    }
+}
+
+/// What the cleanup or rewrite call came back with. A failure is a value here rather than a thrown
+/// error, because the pipeline's rule is that a failed cleanup still inserts the dictation.
+enum CleanupOutcome: Sendable, Equatable {
+    case cleaned(String)
+    case failed(reason: String)
+}
+
+/// What actually goes to the caret, and why, when it is not the cleaned text.
+///
+/// This is the rule dikte settled on at `references/dikte/dikte/worker.py:113-122`: the dictation is
+/// never lost and the failure is never hidden. Both halves matter, and both live here rather than in
+/// the pipeline's control flow, so they can be asserted without a network.
+enum InsertionChoice: Sendable, Equatable {
+    case cleaned(String)
+    case raw(text: String, reason: String)
+
+    /// - Parameter applyingParaphraseGuard: false for the Mode 2 rewrite. The guard compares a
+    ///   cleanup against the words it was given, and an English prompt rewritten from Turkish
+    ///   shares almost none of them by design, so running it there would reject every rewrite and
+    ///   insert the Turkish transcript instead, which is the opposite of what Mode 2 is for.
+    static func resolve(
+        raw: String,
+        cleanup: CleanupOutcome,
+        glossary: [String],
+        applyingParaphraseGuard: Bool
+    ) -> InsertionChoice {
+        switch cleanup {
+        case .failed(let reason):
+            return .raw(text: raw, reason: "Cleanup failed, so the raw transcript went in: \(reason)")
+
+        case .cleaned(let cleaned):
+            guard applyingParaphraseGuard else {
+                return .cleaned(cleaned)
+            }
+            switch ParaphraseGuard.check(raw: raw, cleaned: cleaned, glossary: glossary) {
+            case .accept:
+                return .cleaned(cleaned)
+            case .reject(let reason):
+                return .raw(text: raw, reason: "Raw transcript inserted instead: \(reason)")
+            }
+        }
+    }
+
+    var text: String {
+        switch self {
+        case .cleaned(let text):
+            return text
+        case .raw(let text, _):
+            return text
+        }
+    }
+
+    /// Non-nil exactly when the raw transcript was inserted in place of a cleanup, and it is the
+    /// text both the indicator and the log line carry.
+    var rejectionReason: String? {
+        switch self {
+        case .cleaned:
+            return nil
+        case .raw(_, let reason):
+            return reason
+        }
+    }
+}
+
+/// The orchestrator: it owns the state machine, the stage timing, the failure contract and the
+/// wiring between the pieces Waves 1 to 3 built without any of them knowing about each other.
+///
+/// `@MainActor` because it drives the indicator, the audio cues and the status item. It reaches the
+/// two non-main-actor layers only through their published APIs, and never into `AudioCapture`'s
+/// locked state: the level series arrives with the finished `Recording`, and the live level arrives
+/// through the capture's own `@Sendable` callback, which hops here with `Task { @MainActor in }`
+/// (`evidence/step-08-09-17-swift6-probe.txt`).
+@MainActor
+final class DictationPipeline {
+    /// Every stage transition, for the menu-bar icon. `AppDelegate` owns that mapping.
+    var onStageChange: (PipelineStage) -> Void = { _ in }
+
+    /// A failure the user has to know about. The panel and the cue carry it as well; this exists so
+    /// the status item can show its error state. Never an alert: a modal for a pipeline failure
+    /// would steal the focus the dictation just went to.
+    var onFailure: (String) -> Void = { _ in }
+
+    private let capture = AudioCapture()
+    private let indicator = IndicatorPanel()
+    private let logger = Logger(subsystem: BundleInfo.bundleIdentifier, category: "Pipeline")
+
+    private var machine = PipelineStateMachine()
+    private var processingTask: Task<Void, Never>?
+
+    /// Cached across dictations so the second one reuses the TLS connection, worth about 37 ms
+    /// measured. Rebuilt only when the provider or the model id changes.
+    private var transcriptionClient: TranscriptionClient?
+    private var transcriptionClientKey: String?
+
+    private var configuration = PipelineConfiguration(settings: .load())
+    private var requestedMode: DictationRecord.Mode = .dictate
+    private var activeMode: DictationRecord.Mode = .dictate
+    private var focusTarget: FocusTarget?
+
+    init() {
+        // Registered before anything starts the engine: the tap captures the handler when it is
+        // installed, so a handler set later would never be seen.
+        capture.setLevelHandler { [weak self] level in
+            // This runs on an AVFoundation render thread. Touching the main actor from there
+            // directly is a SIGTRAP rather than a warning, so the hop is mandatory.
+            Task { @MainActor in
+                self?.indicator.update(level: level)
+            }
+        }
+    }
+
+    var stage: PipelineStage {
+        machine.stage
+    }
+
+    // MARK: - The shortcut surface
+
+    /// The chord's first modifier went down. This is the half of Wave 2 that was left unconnected:
+    /// `ShortcutCoordinator` reports the press, `AudioCapture` pays a measured 154 ms cold start,
+    /// and the 150 to 300 ms human gap before the second modifier is what covers it.
+    func warmUpRequested() {
+        perform(machine.handle(.warmUpRequested))
+    }
+
+    func warmUpAbandoned() {
+        perform(machine.handle(.warmUpAbandoned))
+    }
+
+    func startRequested(mode: DictationRecord.Mode = .dictate) {
+        requestedMode = mode
+        perform(machine.handle(.startRequested))
+    }
+
+    func stopRequested() {
+        perform(machine.handle(.stopRequested))
+    }
+
+    /// The keyed toggle. `mode` only applies when this press starts a dictation; a press that stops
+    /// one keeps the mode the running dictation began with.
+    func toggleRequested(mode: DictationRecord.Mode = .dictate) {
+        requestedMode = mode
+        perform(machine.handle(.toggleRequested))
+    }
+
+    func cancelRequested() {
+        perform(machine.handle(.cancelRequested))
+    }
+
+    /// Debug-menu only: runs everything after the microphone from an already-captured recording.
+    /// It is how the whole chain (VAD, encode, transcribe, filter, cleanup, guard, insert, log) is
+    /// driven without a keyboard and without a voice, which is the only way this step can be
+    /// verified by anything other than a human at the machine.
+    func runFromRecording(_ recording: AudioCapture.Recording, mode: DictationRecord.Mode, target: FocusTarget?) {
+        guard machine.stage == .idle else {
+            logger.notice("QA run refused: a dictation is already in flight")
+            return
+        }
+
+        configuration = PipelineConfiguration(settings: .load())
+        _ = machine.handle(.startRequested)
+        _ = machine.handle(.stopRequested)
+        indicator.beginRun(stage: machine.stage)
+        publishStage()
+        beginProcessing(mode: mode, target: target, preCaptured: recording)
+    }
+
+    // MARK: - Carrying out what the table decided
+
+    private func perform(_ action: PipelineStateMachine.Action) {
+        switch action {
+        case .doNothing:
+            break
+        case .warmUpCapture:
+            warmUpCapture()
+        case .cancelWarmUp:
+            capture.cancelWarmUp()
+        case .beginRecording:
+            beginRecording()
+        case .stopAndProcess:
+            beginProcessing(mode: activeMode, target: focusTarget, preCaptured: nil)
+        case .discardRecording:
+            // Same engine and same spool as a warm-up, so this is also the discard path.
+            capture.cancelWarmUp()
+            indicator.endRun(message: "Cancelled")
+        case .abortWork:
+            // The in-flight request unwinds through its own cancellation path and reports from
+            // there, so this only has to ask.
+            processingTask?.cancel()
+        }
+        publishStage()
+    }
+
+    private func warmUpCapture() {
+        do {
+            try capture.warmUp()
+        } catch {
+            // The machine believes the engine is warm, so it has to be told otherwise before the
+            // failure is reported; otherwise the next press would think a warm-up is already open.
+            _ = machine.handle(.warmUpAbandoned)
+            capture.cancelWarmUp()
+            report(failure: error.localizedDescription)
+        }
+    }
+
+    private func beginRecording() {
+        // Read once per dictation: a key or a glossary term entered in Settings takes effect on the
+        // next dictation without a restart, and never changes underneath a running one.
+        configuration = PipelineConfiguration(settings: .load())
+        activeMode = requestedMode
+        // Captured now rather than when the text is ready: the round trip is long enough for the
+        // user to glance at another window, and pasting into that window is how a dictation lands
+        // in the wrong app.
+        focusTarget = FocusTarget.current()
+
+        do {
+            try capture.beginKeeping()
+        } catch {
+            _ = machine.handle(.runEnded)
+            report(failure: error.localizedDescription)
+            return
+        }
+
+        indicator.beginRun(stage: .recording)
+        AudioCue.play(.recordStart, enabled: configuration.audioCuesEnabled)
+    }
+
+    private func beginProcessing(
+        mode: DictationRecord.Mode,
+        target: FocusTarget?,
+        preCaptured: AudioCapture.Recording?
+    ) {
+        let configuration = self.configuration
+        // The handle is deliberately not cleared when the run ends. Clearing it would happen after
+        // the await resumes, which is a suspension point the next dictation can start inside, and
+        // the finished run would then null out the new run's handle and make cancel a no-op.
+        // Cancelling an already-finished task is harmless, so keeping the stale handle is the safe
+        // side of that trade.
+        processingTask = Task { [weak self] in
+            await self?.run(mode: mode, target: target, configuration: configuration, preCaptured: preCaptured)
+        }
+    }
+
+    // MARK: - The run
+
+    private func run(
+        mode: DictationRecord.Mode,
+        target: FocusTarget?,
+        configuration: PipelineConfiguration,
+        preCaptured: AudioCapture.Recording?
+    ) async {
+        // Monotonic, not wall time: `totalMs` is measured from shortcut release to insertion
+        // complete, which is the number the user experiences and the one the Definition of Done
+        // asserts against 1.5 s. A clock change mid-dictation must not move it.
+        let releasedAt = ContinuousClock.now
+        let timestamp = Date()
+        var timings = StageTimings()
+        var temporaryFiles: [URL] = []
+
+        do {
+            // 1. Finish the capture and take the per-chunk level series with it.
+            let recording: AudioCapture.Recording
+            if let preCaptured {
+                recording = preCaptured
+            } else {
+                let started = ContinuousClock.now
+                recording = try capture.stop()
+                timings.record(.capture, seconds: Self.elapsed(since: started))
+            }
+            temporaryFiles.append(recording.fileURL)
+
+            // 2. Room tone: discard, say what was measured, and make no API call at all. The
+            //    absence of a `transcribeMs` in the logged record is what proves none was made.
+            let analysis = VoiceActivity.analyse(
+                rmsValues: recording.chunkRMS,
+                chunkSeconds: recording.chunkSeconds
+            )
+            if VoiceActivity.isSilent(analysis) {
+                let message = String(
+                    format: "No speech detected (peak %.0f dB, %.1f s voiced).",
+                    analysis.speechPeakDB,
+                    analysis.voicedSeconds
+                )
+                remove(temporaryFiles)
+                appendRecord(
+                    timestamp: timestamp,
+                    mode: mode,
+                    audioPath: nil,
+                    duration: recording.duration,
+                    rawTranscript: "",
+                    finalText: "",
+                    reason: message,
+                    timings: timings.record(totalSeconds: Self.elapsed(since: releasedAt)),
+                    configuration: configuration
+                )
+                finish(message: message, isFailure: false)
+                return
+            }
+
+            // 3. Encode to m4a, off the main actor: it is a file read plus an AAC encode, and the
+            //    upload size is the largest lever in the network path.
+            let pcmURL = recording.fileURL
+            let m4aURL = pcmURL.deletingPathExtension().appendingPathExtension("m4a")
+            temporaryFiles.append(m4aURL)
+            let encodeStarted = ContinuousClock.now
+            let audioData: Data = try await Task.detached(priority: .userInitiated) {
+                try AudioEncoder.encodeM4A(pcmFileURL: pcmURL, to: m4aURL)
+                // Only readable once `encodeM4A` has returned: the container index is written when
+                // its `AVAudioFile` deinits, which is at the end of that call.
+                return try Data(contentsOf: m4aURL)
+            }.value
+            timings.record(.encode, seconds: Self.elapsed(since: encodeStarted))
+            remove([pcmURL])
+            temporaryFiles.removeAll { $0 == pcmURL }
+            try Task.checkCancellation()
+
+            // 4. Transcribe.
+            advance(to: .transcribing)
+            let transcribeStarted = ContinuousClock.now
+            let transcription = try await client(for: configuration).transcribe(
+                audioData: audioData,
+                glossaryTerms: configuration.glossaryTerms
+            )
+            timings.record(.transcribe, seconds: Self.elapsed(since: transcribeStarted))
+            let raw = transcription.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            logger.notice("transcribed \(raw.count, privacy: .public) characters")
+
+            // 5. A stock phrase invented for a near-silent clip never reaches the caret.
+            if let discardReason = Self.discardReason(forTranscript: raw, duration: recording.duration) {
+                remove(temporaryFiles)
+                appendRecord(
+                    timestamp: timestamp,
+                    mode: mode,
+                    audioPath: nil,
+                    duration: recording.duration,
+                    rawTranscript: raw,
+                    finalText: "",
+                    reason: discardReason,
+                    timings: timings.record(totalSeconds: Self.elapsed(since: releasedAt)),
+                    configuration: configuration
+                )
+                finish(message: discardReason, isFailure: false)
+                return
+            }
+
+            // 6. Clean up, or rewrite into an English prompt. A failure here is a value, not a
+            //    throw: the dictation still goes in.
+            advance(to: mode == .dictate ? .cleaning : .rewriting)
+            let cleanupStarted = ContinuousClock.now
+            let outcome = try await cleanupOutcome(raw: raw, mode: mode, configuration: configuration)
+            timings.record(.cleanup, seconds: Self.elapsed(since: cleanupStarted))
+
+            // 7. The paraphrase guard, and the decision about what actually gets inserted.
+            let choice = InsertionChoice.resolve(
+                raw: raw,
+                cleanup: outcome,
+                glossary: configuration.glossaryTerms,
+                applyingParaphraseGuard: mode == .dictate
+            )
+
+            // 8. Insert. The cancellation check is here rather than only inside the clients,
+            //    because a cancel that lands between the last response and the paste must still
+            //    leave nothing behind.
+            try Task.checkCancellation()
+            advanceToInserting()
+            let insertStarted = ContinuousClock.now
+            let insertionNote = try await insert(choice.text, into: target, configuration: configuration)
+            timings.record(.insert, seconds: Self.elapsed(since: insertStarted))
+
+            // 9. The record and every stage timing, plus the audio when retention is on.
+            let audioPath = retainedAudioPath(m4aURL, timestamp: timestamp, configuration: configuration)
+            remove(temporaryFiles)
+            appendRecord(
+                timestamp: timestamp,
+                mode: mode,
+                audioPath: audioPath,
+                duration: recording.duration,
+                rawTranscript: raw,
+                finalText: choice.text,
+                reason: choice.rejectionReason,
+                timings: timings.record(totalSeconds: Self.elapsed(since: releasedAt)),
+                configuration: configuration
+            )
+
+            // 10. The cue fires on a completed insertion, including one that inserted the raw
+            //     transcript: the text did land. The reason still shows, because a failure that is
+            //     not surfaced looks exactly like working dictation.
+            if let insertionNote {
+                finish(message: insertionNote, isFailure: true)
+            } else {
+                AudioCue.play(.insertComplete, enabled: configuration.audioCuesEnabled)
+                finish(message: choice.rejectionReason, isFailure: choice.rejectionReason != nil)
+            }
+        } catch is CancellationError {
+            remove(temporaryFiles)
+            finish(message: "Cancelled", isFailure: false)
+        } catch {
+            remove(temporaryFiles)
+            finish(message: error.localizedDescription, isFailure: true)
+        }
+    }
+
+    /// Runs the mode's chat call. Only cancellation propagates; every other failure comes back as
+    /// `.failed`, because losing the dictation is worse than losing the cleanup.
+    private func cleanupOutcome(
+        raw: String,
+        mode: DictationRecord.Mode,
+        configuration: PipelineConfiguration
+    ) async throws -> CleanupOutcome {
+        let messages = PromptAssembly.messages(
+            for: mode == .dictate ? .cleanup : .promptRewrite,
+            transcript: raw,
+            glossary: configuration.glossaryTerms
+        )
+        let client = ChatClient(
+            endpoint: configuration.chatEndpoint(for: mode),
+            apiKeyAccount: configuration.chatKeychainAccount(for: mode),
+            modelId: configuration.cleanupModelId
+        )
+
+        do {
+            let reply = try await client.complete(
+                messages: messages,
+                maxTokens: PipelineConfiguration.maxTokens(forTranscript: raw)
+            )
+            return .cleaned(reply.trimmingCharacters(in: .whitespacesAndNewlines))
+        } catch {
+            // A cancelled request is not a cleanup failure: it must insert nothing at all.
+            if error is CancellationError || Task.isCancelled {
+                throw CancellationError()
+            }
+            logger.error("cleanup failed: \(error.localizedDescription, privacy: .public)")
+            return .failed(reason: error.localizedDescription)
+        }
+    }
+
+    /// Puts `text` where the user can use it, and returns the note to show when that was not the
+    /// caret. Returning a note rather than throwing keeps the log append on the success path: the
+    /// dictation happened either way and must be recorded.
+    private func insert(
+        _ text: String,
+        into target: FocusTarget?,
+        configuration: PipelineConfiguration
+    ) async throws -> String? {
+        guard configuration.autoInsert else {
+            try TextInserter.write(text, to: .general)
+            return "Auto-insert is off, so the text is on the clipboard."
+        }
+        guard let target else {
+            try TextInserter.write(text, to: .general)
+            return "No application was frontmost when recording started, so the text is on the clipboard."
+        }
+
+        do {
+            try await TextInserter.insert(text, into: target)
+            return nil
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            // Every `InsertionError` leaves the text on the clipboard by construction, and its own
+            // message says so, so this is reported rather than retried.
+            return error.localizedDescription
+        }
+    }
+
+    // MARK: - Stage reporting
+
+    private func advance(to activity: PipelineStage.Activity) {
+        _ = machine.handle(.activityChanged(activity))
+        publishStage()
+    }
+
+    private func advanceToInserting() {
+        _ = machine.handle(.insertionStarted)
+        publishStage()
+    }
+
+    private func publishStage() {
+        let stage = machine.stage
+        if stage.isBusy {
+            indicator.update(stage: stage)
+        }
+        onStageChange(stage)
+    }
+
+    private func finish(message: String?, isFailure: Bool) {
+        _ = machine.handle(.runEnded)
+        indicator.endRun(message: message)
+        publishStage()
+
+        guard isFailure, let message else {
+            return
+        }
+        logger.error("dictation reported a failure: \(message, privacy: .public)")
+        onFailure(message)
+    }
+
+    /// A failure with no run behind it (a warm-up that could not start, a capture that never
+    /// began). Same channel as `finish`, minus the state transition.
+    private func report(failure message: String) {
+        indicator.endRun(message: message)
+        logger.error("\(message, privacy: .public)")
+        onFailure(message)
+    }
+
+    // MARK: - Pieces the run leans on
+
+    private func client(for configuration: PipelineConfiguration) -> TranscriptionClient {
+        let key = "\(configuration.provider.rawValue)|\(configuration.transcriptionModelId)"
+        if key == transcriptionClientKey, let transcriptionClient {
+            return transcriptionClient
+        }
+
+        let provider: any TranscriptionProvider
+        switch configuration.provider {
+        case .groq:
+            provider = GroqTranscriptionProvider(modelId: configuration.transcriptionModelId)
+        case .openAI:
+            provider = OpenAITranscriptionProvider(modelId: configuration.transcriptionModelId)
+        case .openRouter:
+            provider = OpenRouterTranscriptionProvider(modelId: configuration.transcriptionModelId)
+        }
+
+        let client = TranscriptionClient(provider: provider)
+        transcriptionClient = client
+        transcriptionClientKey = key
+        return client
+    }
+
+    /// Why this transcript must not reach the caret, or `nil` when it may.
+    private static func discardReason(forTranscript raw: String, duration: TimeInterval) -> String? {
+        if raw.isEmpty {
+            return "The transcript came back empty, so nothing was inserted."
+        }
+        guard HallucinationFilter.looksLikeHallucination(text: raw, duration: duration) else {
+            return nil
+        }
+        return "Discarded a stock phrase: \"\(raw.prefix(60))\""
+    }
+
+    private func appendRecord(
+        timestamp: Date,
+        mode: DictationRecord.Mode,
+        audioPath: URL?,
+        duration: Double,
+        rawTranscript: String,
+        finalText: String,
+        reason: String?,
+        timings: DictationRecord.Timings,
+        configuration: PipelineConfiguration
+    ) {
+        let record = DictationRecord(
+            timestamp: timestamp,
+            mode: mode,
+            audioPath: audioPath,
+            duration: duration,
+            rawTranscript: rawTranscript,
+            finalText: finalText,
+            // The log's one free-text reason field. It carries a paraphrase rejection, a cleanup
+            // failure or a discard reason, all of which answer the same question an offline reader
+            // asks: why is `finalText` not the cleaned transcript.
+            paraphraseRejectionReason: reason,
+            transcriptionModelId: configuration.transcriptionModelId,
+            cleanupModelId: configuration.cleanupModelId,
+            timings: timings
+        )
+
+        do {
+            try DictationLog.append(record)
+            try DictationLog.trim(to: configuration.historyLimit)
+        } catch {
+            // The dictation already reached the caret, so this is not a failed dictation; it is
+            // still logged loudly, because a silent log failure is what would make the follow-on
+            // plan's offline replay quietly incomplete.
+            logger.error("could not write the dictation log: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func retainedAudioPath(
+        _ audioURL: URL,
+        timestamp: Date,
+        configuration: PipelineConfiguration
+    ) -> URL? {
+        guard configuration.retainAudio else {
+            return nil
+        }
+        do {
+            return try DictationLog.retainAudio(from: audioURL, timestamp: timestamp)
+        } catch {
+            logger.error("could not retain the dictation audio: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+    }
+
+    private func remove(_ urls: [URL]) {
+        for url in urls where FileManager.default.fileExists(atPath: url.path) {
+            do {
+                try FileManager.default.removeItem(at: url)
+            } catch {
+                logger.warning("could not remove \(url.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    private static func elapsed(since instant: ContinuousClock.Instant) -> Double {
+        StageTimings.seconds(instant.duration(to: ContinuousClock.now))
+    }
+}
