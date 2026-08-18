@@ -73,52 +73,52 @@ struct SettingsPersistenceTests {
 
     @Test("a missing settings file loads defaults")
     func missingFileLoadsDefaults() throws {
-        let originalData = try? Data(contentsOf: Settings.fileURL)
-        defer { restore(originalData) }
+        let directory: URL = Self.makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
 
-        try? FileManager.default.removeItem(at: Settings.fileURL)
-
-        #expect(Settings.load() == Settings.default)
+        #expect(Settings.load(from: directory) == Settings.default)
     }
 
     @Test("a truncated or malformed settings file loads defaults rather than crashing")
     func malformedFileLoadsDefaults() throws {
-        let originalData = try? Data(contentsOf: Settings.fileURL)
-        defer { restore(originalData) }
+        let directory: URL = Self.makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
 
-        try FileManager.default.createDirectory(
-            at: BundleInfo.applicationSupportDirectory,
-            withIntermediateDirectories: true
-        )
-        try Data("{ this is not valid json".utf8).write(to: Settings.fileURL)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data("{ this is not valid json".utf8).write(to: Settings.fileURL(in: directory))
 
-        #expect(Settings.load() == Settings.default)
+        #expect(Settings.load(from: directory) == Settings.default)
     }
 
     @Test("saving writes the file with owner-only permissions and load reads it back")
     func saveWritesOwnerOnlyPermissionsAndLoadRoundTrips() throws {
-        let originalData = try? Data(contentsOf: Settings.fileURL)
-        defer { restore(originalData) }
+        let directory: URL = Self.makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
 
         var settings = Settings.default
         settings.historyLimit = 99
         settings.retainAudio = false
 
-        try settings.save()
+        try settings.save(to: directory)
 
-        let attributes = try FileManager.default.attributesOfItem(atPath: Settings.fileURL.path)
+        let attributes = try FileManager.default.attributesOfItem(
+            atPath: Settings.fileURL(in: directory).path
+        )
         let permissions = attributes[.posixPermissions] as? Int
         #expect(permissions == 0o600)
-        #expect(Settings.load() == settings)
+        #expect(Settings.load(from: directory) == settings)
     }
 
-    /// Restores whatever `settings.json` held before a test ran, so a real settings file on this
-    /// machine is never permanently overwritten by a test run.
-    private func restore(_ data: Data?) {
-        guard let data else {
-            try? FileManager.default.removeItem(at: Settings.fileURL)
-            return
-        }
-        try? data.write(to: Settings.fileURL)
+    /// A directory of this test's own, so nothing here touches the user's real `settings.json` and
+    /// no two tests in this suite can race each other.
+    ///
+    /// Swift Testing runs tests in parallel by default. An earlier version of this suite shared the
+    /// one real settings file and saved-then-restored it around each test, which failed two
+    /// different ways depending on interleaving: a load finding no file, and a load returning
+    /// defaults because a sibling had already restored the file. Shared mutable global state is the
+    /// bug; a per-test path removes it rather than serialising around it.
+    private static func makeScratchDirectory() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("MyDikteSettingsTests-\(UUID().uuidString)", isDirectory: true)
     }
 }

@@ -91,13 +91,23 @@ enum SettingsError: Error, LocalizedError {
 }
 
 extension Settings {
-    /// The fixed on-disk location for the settings file.
-    static let fileURL: URL = BundleInfo.applicationSupportDirectory.appendingPathComponent("settings.json")
+    /// The app's real settings directory. Both `load` and `save` take a directory rather than
+    /// reading this constant directly, so a test can point them at a temporary path and never
+    /// touch the user's own file. Without that parameter the persistence tests all shared one
+    /// global file and raced each other under Swift Testing's default parallel execution, which
+    /// made the suite flaky in two different ways: a load finding no file at all, and a load
+    /// returning defaults because a sibling test had restored the file mid-run.
+    static var defaultDirectory: URL { BundleInfo.applicationSupportDirectory }
+
+    /// The on-disk location for the settings file inside `directory`.
+    static func fileURL(in directory: URL = Settings.defaultDirectory) -> URL {
+        directory.appendingPathComponent("settings.json")
+    }
 
     /// Loads settings from disk, falling back to `Settings.default` when the file is missing or
     /// cannot be decoded, rather than crashing on a corrupt or partially written file.
-    static func load() -> Settings {
-        guard let data = try? Data(contentsOf: fileURL) else {
+    static func load(from directory: URL = Settings.defaultDirectory) -> Settings {
+        guard let data = try? Data(contentsOf: fileURL(in: directory)) else {
             return .default
         }
         guard let settings = try? JSONDecoder().decode(Settings.self, from: data) else {
@@ -106,20 +116,15 @@ extension Settings {
         return settings
     }
 
-    /// Writes this value to `Settings.fileURL` with owner-only (`0600`) permissions, since the
-    /// file sits alongside no keys but still carries model ids and endpoints the user chose.
-    func save() throws {
+    /// Writes this value with owner-only (`0600`) permissions, since the file sits alongside no
+    /// keys but still carries model ids and endpoints the user chose.
+    func save(to directory: URL = Settings.defaultDirectory) throws {
         do {
-            try FileManager.default.createDirectory(
-                at: BundleInfo.applicationSupportDirectory,
-                withIntermediateDirectories: true
-            )
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let url: URL = Settings.fileURL(in: directory)
             let data = try JSONEncoder().encode(self)
-            try data.write(to: Self.fileURL, options: .atomic)
-            try FileManager.default.setAttributes(
-                [.posixPermissions: 0o600],
-                ofItemAtPath: Self.fileURL.path
-            )
+            try data.write(to: url, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
         } catch {
             throw SettingsError.writeFailed(underlying: error)
         }
