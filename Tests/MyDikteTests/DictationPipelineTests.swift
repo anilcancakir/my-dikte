@@ -239,6 +239,41 @@ struct InsertionChoiceTests {
     }
 }
 
+/// Zero captured buffers and a room full of quiet air are different failures with different fixes,
+/// and reporting the first as the second is what sent a real dictation attempt looking for a
+/// microphone problem that did not exist. Measured on this machine: a 1.4 s push-to-talk hold with
+/// AirPods as the input device produced 0 frames and read "No speech detected (peak -120 dB)", while
+/// the same device over a 5 s window captured 5.23 s of audio normally.
+@Suite("Empty capture")
+struct EmptyCaptureTests {
+    @Test("a capture that produced buffers has no empty-capture failure")
+    func capturedAudioHasNoFailure() {
+        #expect(DictationPipeline.emptyCaptureReason(chunkCount: 12, heldSeconds: 1.4) == nil)
+    }
+
+    @Test("zero buffers reports the input device, not the absence of speech")
+    func zeroBuffersReportsTheDevice() {
+        let reason = DictationPipeline.emptyCaptureReason(chunkCount: 0, heldSeconds: 1.4)
+        #expect(reason != nil)
+        #expect(reason?.contains("no audio") == true)
+        #expect(reason?.lowercased().contains("no speech") == false)
+    }
+
+    @Test("the message names the hold that was too short, so the next attempt can be longer")
+    func messageNamesTheHold() {
+        let reason = DictationPipeline.emptyCaptureReason(chunkCount: 0, heldSeconds: 1.4)
+        #expect(reason?.contains("1.4") == true)
+    }
+
+    @Test("a short hold is told to hold longer; a long one is not, since that is a real fault")
+    func adviceDependsOnTheHold() {
+        let short = DictationPipeline.emptyCaptureReason(chunkCount: 0, heldSeconds: 1.0)
+        let long = DictationPipeline.emptyCaptureReason(chunkCount: 0, heldSeconds: 8.0)
+        #expect(short?.contains("Bluetooth") == true)
+        #expect(long?.contains("Bluetooth") == false)
+    }
+}
+
 @Suite("PipelineConfiguration")
 struct PipelineConfigurationTests {
     @Test("an unset model id resolves to the model this plan measured")

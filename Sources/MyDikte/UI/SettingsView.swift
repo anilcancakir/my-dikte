@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import SwiftUI
 
 /// The five settings panes: shortcuts, glossary, models, keys and behaviour. Every field maps to
@@ -49,30 +50,38 @@ private struct ShortcutsPane: View {
     @Binding var settings: Settings
     let onChange: () -> Void
 
+    /// The coordinator's own defaults, so each row can say what is in force while it holds no
+    /// recording. Read from the same type the coordinator is built with, never restated here.
+    private let defaults = ShortcutCoordinator.Configuration()
+
     var body: some View {
         Form {
             ShortcutRecorderRow(
                 title: "Push to talk",
                 isModifierOnly: true,
                 chord: $settings.pushToTalkChord,
+                fallback: ShortcutFormatter.describe(defaults.chord),
                 onChange: onChange
             )
             ShortcutRecorderRow(
                 title: "Start/Stop toggle",
                 isModifierOnly: false,
                 chord: $settings.toggleShortcut,
+                fallback: ShortcutFormatter.describe(defaults.toggle),
                 onChange: onChange
             )
             ShortcutRecorderRow(
                 title: "Cancel",
                 isModifierOnly: false,
                 chord: $settings.cancelShortcut,
+                fallback: ShortcutFormatter.describe(defaults.cancel),
                 onChange: onChange
             )
             ShortcutRecorderRow(
                 title: "Mode 2 prompt toggle",
                 isModifierOnly: false,
                 chord: $settings.promptToggleShortcut,
+                fallback: ShortcutFormatter.describe(defaults.promptToggle),
                 onChange: onChange
             )
 
@@ -93,6 +102,10 @@ private struct ShortcutRecorderRow: View {
     let title: String
     let isModifierOnly: Bool
     @Binding var chord: Settings.KeyChord
+    /// What the app will actually use while this row holds no recording, drawn from the coordinator's
+    /// own defaults. An unrecorded row used to read "Not set" next to a shortcut that works perfectly
+    /// well, which reads as a broken setting rather than as a default in force.
+    let fallback: String
     let onChange: () -> Void
 
     @State private var isRecording = false
@@ -106,7 +119,7 @@ private struct ShortcutRecorderRow: View {
         HStack {
             Text(title)
             Spacer()
-            Text(isRecording ? "Listening…" : ShortcutFormatter.describe(chord))
+            Text(isRecording ? "Listening…" : (ShortcutFormatter.describe(chord) ?? "\(fallback) (default)"))
                 .font(.system(.body, design: .monospaced))
                 .foregroundStyle(isRecording ? .orange : .secondary)
             Button(isRecording ? "Cancel" : "Record") {
@@ -182,20 +195,93 @@ private struct ShortcutRecorderRow: View {
 }
 
 private enum ShortcutFormatter {
-    /// An unreadable chord reads as unset on purpose: `ShortcutBinding` does not honour one either,
-    /// so the row shows what the app will actually use.
-    static func describe(_ chord: Settings.KeyChord) -> String {
+    /// A recorded chord, or `nil` when this row holds nothing the app would honour, in which case the
+    /// caller draws the default instead. An unreadable chord counts as nothing on purpose:
+    /// `ShortcutBinding` does not honour one either, so the row keeps showing what will actually run.
+    static func describe(_ chord: Settings.KeyChord) -> String? {
         guard let keys: [ShortcutCoordinator.ModifierKey] = ShortcutBinding.modifierKeys(in: chord),
             !keys.isEmpty
         else {
-            return "Not set"
+            return nil
         }
 
         guard let keyCode: UInt16 = chord.keyCode else {
             return keys.map(name(for:)).joined(separator: " then ")
         }
-        return "\(symbols(for: ShortcutBinding.modifierFlags(for: keys))) key \(keyCode)"
+        return "\(symbols(for: ShortcutBinding.modifierFlags(for: keys)))\(keyName(for: keyCode))"
     }
+
+    /// The push-to-talk default, drawn the same way a recorded chord is.
+    static func describe(_ chord: ShortcutCoordinator.Chord) -> String {
+        "\(name(for: chord.first)) then \(name(for: chord.second))"
+    }
+
+    /// A keyed default. Carbon's mask is translated back rather than reinterpreted, since its bits
+    /// are a different layout from `NSEvent`'s.
+    static func describe(_ binding: CarbonHotkey.Binding) -> String {
+        var flags = NSEvent.ModifierFlags()
+        if binding.modifiers & UInt32(controlKey) != 0 { flags.insert(.control) }
+        if binding.modifiers & UInt32(optionKey) != 0 { flags.insert(.option) }
+        if binding.modifiers & UInt32(shiftKey) != 0 { flags.insert(.shift) }
+        if binding.modifiers & UInt32(cmdKey) != 0 { flags.insert(.command) }
+        return "\(symbols(for: flags))\(keyName(for: UInt16(binding.keyCode)))"
+    }
+
+    /// The character a key code produces, so a row reads "⌃⌥D" rather than "⌃⌥ key 2". Resolved
+    /// through the active keyboard layout rather than a hardcoded table, because a key code is a
+    /// physical position and the letter on it depends on the layout the user actually types with.
+    static func keyName(for keyCode: UInt16) -> String {
+        if let named = namedKeys[keyCode] {
+            return named
+        }
+        guard
+            let source = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(),
+            let pointer = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData)
+        else {
+            return "key \(keyCode)"
+        }
+
+        let data = Unmanaged<CFData>.fromOpaque(pointer).takeUnretainedValue() as Data
+        var deadKeyState: UInt32 = 0
+        var length = 0
+        var characters = [UniChar](repeating: 0, count: 4)
+
+        let status: OSStatus = data.withUnsafeBytes { raw in
+            guard let layout = raw.baseAddress?.assumingMemoryBound(to: UCKeyboardLayout.self) else {
+                return OSStatus(paramErr)
+            }
+            return UCKeyTranslate(
+                layout,
+                keyCode,
+                UInt16(kUCKeyActionDisplay),
+                0,
+                UInt32(LMGetKbdType()),
+                OptionBits(kUCKeyTranslateNoDeadKeysBit),
+                &deadKeyState,
+                characters.count,
+                &length,
+                &characters
+            )
+        }
+
+        guard status == noErr, length > 0 else {
+            return "key \(keyCode)"
+        }
+        return String(utf16CodeUnits: characters, count: length).uppercased()
+    }
+
+    /// Keys that produce no printable character, so the layout cannot name them.
+    private static let namedKeys: [UInt16: String] = [
+        UInt16(kVK_Space): "Space",
+        UInt16(kVK_Return): "Return",
+        UInt16(kVK_Tab): "Tab",
+        UInt16(kVK_Escape): "Esc",
+        UInt16(kVK_Delete): "Delete",
+        UInt16(kVK_LeftArrow): "←",
+        UInt16(kVK_RightArrow): "→",
+        UInt16(kVK_UpArrow): "↑",
+        UInt16(kVK_DownArrow): "↓",
+    ]
 
     /// Carbon cannot tell the two sides of a modifier apart, so a keyed shortcut is drawn without a
     /// side while the push-to-talk chord above is drawn with one.
@@ -267,21 +353,58 @@ private struct ModelsPane: View {
             }
             .onChange(of: settings.transcriptionProvider) { _, _ in onChange() }
 
-            TextField("Transcription model id", text: $settings.transcriptionModelId)
-                .onChange(of: settings.transcriptionModelId) { _, _ in onChange() }
+            TextField(
+                "Transcription model id",
+                text: $settings.transcriptionModelId,
+                prompt: Text(PipelineConfiguration.defaultTranscriptionModelId)
+            )
+            .onChange(of: settings.transcriptionModelId) { _, _ in onChange() }
 
             Divider()
 
-            TextField("Cleanup model id", text: $settings.cleanupModelId)
-                .onChange(of: settings.cleanupModelId) { _, _ in onChange() }
+            TextField(
+                "Cleanup model id",
+                text: $settings.cleanupModelId,
+                prompt: Text(PipelineConfiguration.defaultCleanupModelId)
+            )
+            .onChange(of: settings.cleanupModelId) { _, _ in onChange() }
 
             TextField("Cleanup endpoint", text: $settings.cleanupEndpoint)
                 .onChange(of: settings.cleanupEndpoint) { _, _ in onChange() }
 
             TextField("Rewrite endpoint", text: $settings.rewriteEndpoint)
                 .onChange(of: settings.rewriteEndpoint) { _, _ in onChange() }
+
+            // The stored endpoint and the endpoint used are not the same string, and showing only
+            // the stored one made this pane read as misconfigured: it says api.openai.com while the
+            // provider says groq, because the untouched OpenAI default is resolved to Groq rather
+            // than sent to OpenAI. The pane now states what the requests will actually go to.
+            Text(inUseSummary)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.top, 12)
+    }
+
+    /// What the requests will actually go to, built as a plain string rather than inline in the view:
+    /// the interpolated concatenation defeated the type checker.
+    private var inUseSummary: String {
+        let configuration = PipelineConfiguration(settings: settings)
+        let transcription: String = configuration.transcriptionModelId
+        let cleanup: String = configuration.cleanupModelId
+        let cleanupEndpoint: String = configuration.chatEndpoint(for: .dictate)
+        let rewriteEndpoint: String = configuration.chatEndpoint(for: .prompt)
+
+        var lines: [String] = []
+        lines.append("In use now: \(transcription) for transcription.")
+        lines.append("\(cleanup) at \(cleanupEndpoint) for cleanup.")
+        lines.append("\(rewriteEndpoint) for Mode 2.")
+        lines.append(
+            "An empty field means the built-in default shown in grey, and the untouched OpenAI "
+                + "endpoint resolves to Groq rather than being sent to OpenAI."
+        )
+        return lines.joined(separator: " ")
     }
 }
 

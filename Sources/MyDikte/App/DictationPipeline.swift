@@ -402,12 +402,21 @@ final class DictationPipeline {
 
             // 2. Room tone: discard, say what was measured, and make no API call at all. The
             //    absence of a `transcribeMs` in the logged record is what proves none was made.
+            //
+            //    An empty capture is checked first and reported separately. Feeding it to the
+            //    analyser is not wrong, but the analyser answers "how loud was it" and an empty
+            //    series has no answer, so it returns its -120 dB floor and the user reads a
+            //    measurement that was never taken.
             let analysis = VoiceActivity.analyse(
                 rmsValues: recording.chunkRMS,
                 chunkSeconds: recording.chunkSeconds
             )
-            if VoiceActivity.isSilent(analysis) {
-                let message = String(
+            let emptyCapture = Self.emptyCaptureReason(
+                chunkCount: recording.chunkRMS.count,
+                heldSeconds: recording.duration
+            )
+            if emptyCapture != nil || VoiceActivity.isSilent(analysis) {
+                let message = emptyCapture ?? String(
                     format: "No speech detected (peak %.0f dB, %.1f s voiced).",
                     analysis.speechPeakDB,
                     analysis.voicedSeconds
@@ -658,6 +667,40 @@ final class DictationPipeline {
         transcriptionClientKey = key
         return client
     }
+
+    /// Why this capture cannot be analysed at all, or `nil` when it produced audio.
+    ///
+    /// Zero buffers is not silence, and the two need different messages because they need different
+    /// fixes: silence means speak up or check the room, zero buffers means the input device never
+    /// started delivering. Measured on this machine, which is why this branch exists: the built-in
+    /// microphone's first buffer lands 156 ms after `engine.start()`, while AirPods as the input
+    /// device produced **0 frames** across a 1.4 s push-to-talk hold and then captured 5.23 s
+    /// normally when given a 5 s window. Bluetooth opens its microphone link about a second after
+    /// the engine starts, so a short hold can end before the first buffer ever arrives, and the
+    /// user reads "No speech detected (peak -120 dB)" and goes looking for a microphone fault that
+    /// is not there. -120 dB is the analyser's floor for an empty series, not a measurement.
+    ///
+    /// Past a few seconds the Bluetooth advice stops being true and would be misleading, so a long
+    /// hold that still produced nothing is reported as the plain fault it is.
+    /// `nonisolated` because it reads nothing but its arguments: the enclosing type is `@MainActor`
+    /// for the indicator and the cues, and a pure decision has no reason to inherit that.
+    nonisolated static func emptyCaptureReason(chunkCount: Int, heldSeconds: Double) -> String? {
+        guard chunkCount == 0 else {
+            return nil
+        }
+
+        let held = String(format: "%.1f", heldSeconds)
+        guard heldSeconds < Self.bluetoothWarmUpAdviceSeconds else {
+            return "The input device delivered no audio in \(held) s. Check that the right "
+                + "microphone is selected in System Settings, Sound, Input."
+        }
+        return "The input device delivered no audio in \(held) s. A Bluetooth microphone such as "
+            + "AirPods takes about a second to open its link, so hold the chord longer, or use the "
+            + "toggle shortcut, which has no hold requirement at all."
+    }
+
+    /// Above this hold, blaming a Bluetooth link's start-up time is no longer credible.
+    private nonisolated static let bluetoothWarmUpAdviceSeconds: Double = 4.0
 
     /// Why this transcript must not reach the caret, or `nil` when it may.
     private static func discardReason(forTranscript raw: String, duration: TimeInterval) -> String? {
