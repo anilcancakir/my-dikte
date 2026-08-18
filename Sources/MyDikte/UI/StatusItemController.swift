@@ -1,11 +1,12 @@
 import AppKit
+import ServiceManagement
 
 /// Owns the real menu-bar status item: a state-driven icon plus the full action menu.
 ///
-/// Start/Stop, Cancel and History have no owner yet: the pipeline lands in Step 17 and the
-/// history window in Step 16, both in Wave 4. Each is wired through an injectable closure that
-/// defaults to a logging no-op, so those later steps attach to this controller instead of
-/// editing it, per the plan's Wave 3 to Wave 4 seam.
+/// Start/Stop and Cancel have no owner yet: the pipeline lands in Step 17, still in Wave 4, and
+/// stays on its injectable logging no-op until then. History and Launch at Login are wired in
+/// this step, entirely inside this file, since Step 17 owns `App/AppDelegate.swift` this wave and
+/// this controller's own closures are the seam Step 16 was told to use instead.
 ///
 /// `references/pindrop/Pindrop/UI/StatusBarController.swift:129,166` is the status-item and
 /// template-image pattern this follows.
@@ -28,15 +29,19 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     var onStart: () -> Void = { NSLog("MyDikte: Start action not wired yet") }
     var onStop: () -> Void = { NSLog("MyDikte: Stop action not wired yet") }
     var onCancel: () -> Void = { NSLog("MyDikte: Cancel action not wired yet") }
+
+    /// Wired to `historyWindowController.show()` at the end of `init`, below. Kept as a closure
+    /// rather than a direct call from `handleOpenHistory` so this stays consistent with the other
+    /// Wave 4 seams above, even though this one's real implementation lives in this same file.
     var onOpenHistory: () -> Void = { NSLog("MyDikte: History action not wired yet") }
 
-    /// The launch-at-login toggle has no real backing yet either: `SMAppService` registration is
-    /// Step 16's Reuse Map entry, not this one's, so this menu item only reports the click.
+    /// Wired to `setLaunchAtLogin(enabled:)` at the end of `init`, below.
     var onToggleLaunchAtLogin: (Bool) -> Void = { enabled in
         NSLog("MyDikte: Launch at login toggle not wired yet (requested \(enabled))")
     }
 
     private let permissionGate = PermissionGate()
+    private lazy var historyWindowController = HistoryWindowController()
 
     private var statusItem: NSStatusItem?
     private let menu = NSMenu()
@@ -54,16 +59,23 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
     }
 
-    private var launchAtLoginEnabled = false {
-        didSet {
-            launchAtLoginItem?.state = launchAtLoginEnabled ? .on : .off
-        }
-    }
-
     override init() {
         super.init()
         buildStatusItem()
         buildMenu()
+        wireHistoryAndLaunchAtLogin()
+    }
+
+    /// Assigns real implementations to the two Wave 4 seams this step owns. Done here, after
+    /// `buildMenu()`, rather than at property declaration, since both closures capture `self`.
+    private func wireHistoryAndLaunchAtLogin() {
+        onOpenHistory = { [weak self] in
+            self?.historyWindowController.show()
+        }
+        onToggleLaunchAtLogin = { [weak self] enabled in
+            self?.setLaunchAtLogin(enabled: enabled)
+        }
+        refreshLaunchAtLoginState()
     }
 
     /// Called by Step 17 to reflect a pipeline stage transition. `AppDelegate` never calls this
@@ -148,9 +160,12 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         updateStartStopAndCancel()
     }
 
-    /// Refreshes the Accessibility warning line each time the menu opens, since the grant can
-    /// arrive at any point while the app runs and nothing else in this file polls for it.
+    /// Refreshes the Accessibility warning line and the Launch at Login checkmark each time the
+    /// menu opens: both can change from outside this app (a grant in System Settings, a login
+    /// item toggled from the same place) and nothing else in this file polls for either.
     func menuNeedsUpdate(_ menu: NSMenu) {
+        refreshLaunchAtLoginState()
+
         guard let warning = accessibilityWarningItem else {
             return
         }
@@ -233,7 +248,75 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     @objc private func handleToggleLaunchAtLogin() {
-        launchAtLoginEnabled.toggle()
-        onToggleLaunchAtLogin(launchAtLoginEnabled)
+        let requestedEnabled = launchAtLoginItem?.state != .on
+        onToggleLaunchAtLogin(requestedEnabled)
+    }
+
+    // MARK: - Launch at Login
+
+    /// The result of one read or one register/unregister call, carried back across the actor hop
+    /// in `performLaunchAtLoginToggle` and `readLaunchAtLoginStatus` below.
+    private struct LaunchAtLoginResult: Sendable {
+        let isEnabled: Bool
+        let failureMessage: String?
+    }
+
+    /// Re-reads `SMAppService.mainApp.status` and updates the checkmark, without registering or
+    /// unregistering anything. Called at construction and on every menu open.
+    private func refreshLaunchAtLoginState() {
+        Task {
+            let isEnabled = await Self.readLaunchAtLoginStatus()
+            launchAtLoginItem?.state = isEnabled ? .on : .off
+        }
+    }
+
+    /// Registers or unregisters via `LaunchAtLogin`, off the main actor since `SMAppService` calls
+    /// can block, per `references/VoiceInk/VoiceInk/Services/LaunchAtLoginManager.swift:92-122`.
+    /// A failure is surfaced through an alert rather than swallowed; the checkmark always ends up
+    /// reflecting the real post-attempt status, not the requested one.
+    private func setLaunchAtLogin(enabled: Bool) {
+        Task {
+            let result = await Self.performLaunchAtLoginToggle(enabled: enabled)
+            launchAtLoginItem?.state = result.isEnabled ? .on : .off
+            if let message = result.failureMessage {
+                presentLaunchAtLoginFailure(message)
+            }
+        }
+    }
+
+    private nonisolated static func readLaunchAtLoginStatus() async -> Bool {
+        await Task.detached(priority: .utility) {
+            LaunchAtLogin.status == .enabled
+        }.value
+    }
+
+    private nonisolated static func performLaunchAtLoginToggle(enabled: Bool) async -> LaunchAtLoginResult {
+        await Task.detached(priority: .utility) {
+            do {
+                if enabled {
+                    try LaunchAtLogin.register()
+                } else {
+                    try LaunchAtLogin.unregister()
+                }
+                return LaunchAtLoginResult(isEnabled: LaunchAtLogin.status == .enabled, failureMessage: nil)
+            } catch {
+                return LaunchAtLoginResult(
+                    isEnabled: LaunchAtLogin.status == .enabled,
+                    failureMessage: error.localizedDescription
+                )
+            }
+        }.value
+    }
+
+    /// An accessory app's alert stays behind the target window unless the app activates first,
+    /// matching `App/DebugMenu+Output.swift`'s `presentFailure`.
+    private func presentLaunchAtLoginFailure(_ message: String) {
+        NSApplication.shared.activate()
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Launch at Login"
+        alert.informativeText = message
+        _ = alert.runModal()
     }
 }
