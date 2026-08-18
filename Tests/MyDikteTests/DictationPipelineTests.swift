@@ -380,3 +380,50 @@ struct ShortAudioAdviceTests {
         #expect(DictationPipeline.shortAudioAdvice(seconds: 0) == "")
     }
 }
+
+/// "The cleanup endpoint returned no message content" reads like a provider outage. The measured
+/// instance was not one: a 3.3 s hold, 1.6 s of it a Bluetooth link opening, produced the three-word
+/// transcript "Ben olacak görelim." and Mode 2 had nothing to rewrite. The same prompt and budget
+/// turned a real request into a full English prompt on the first try.
+@Suite("Thin transcript advice")
+struct ThinTranscriptAdviceTests {
+    private static let empty = ChatClient.ChatClientError.emptyResponse
+
+    @Test("a three-word Mode 2 transcript is told what Mode 2 needs")
+    func thinPromptTranscriptGetsAdvice() {
+        let advice = DictationPipeline.thinTranscriptAdvice(
+            transcript: "Ben olacak görelim.",
+            mode: .prompt,
+            error: Self.empty
+        )
+        #expect(advice.contains("3 word"))
+        #expect(advice.contains("Mode 2"))
+    }
+
+    @Test("a thin Mode 1 transcript is not told about Mode 2, which it is not using")
+    func thinDictateTranscriptGetsItsOwnAdvice() {
+        let advice = DictationPipeline.thinTranscriptAdvice(
+            transcript: "tamam peki", mode: .dictate, error: Self.empty
+        )
+        #expect(advice.contains("2 word"))
+        #expect(advice.contains("Mode 2") == false)
+    }
+
+    @Test("a full transcript gets no length advice, since length is not the cause")
+    func fullTranscriptGetsNoAdvice() {
+        let transcript = "bugün Kubernetes üzerinde çalışan bütün servisleri güncelledim ve panelleri açtım"
+        #expect(DictationPipeline.thinTranscriptAdvice(
+            transcript: transcript, mode: .prompt, error: Self.empty) == "")
+    }
+
+    /// A network error already says what it is; appending a guess about length would be noise.
+    @Test("only an empty response is annotated, not every cleanup failure")
+    func onlyEmptyResponseIsAnnotated() {
+        let advice = DictationPipeline.thinTranscriptAdvice(
+            transcript: "kısa",
+            mode: .prompt,
+            error: ChatClient.ChatClientError.serverError(statusCode: 503, body: "upstream unavailable")
+        )
+        #expect(advice == "")
+    }
+}

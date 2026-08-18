@@ -661,7 +661,10 @@ final class DictationPipeline {
                 throw CancellationError()
             }
             logger.error("cleanup failed: \(error.localizedDescription, privacy: .public)")
-            return .failed(reason: error.localizedDescription)
+            return .failed(
+                reason: error.localizedDescription
+                    + Self.thinTranscriptAdvice(transcript: raw, mode: mode, error: error)
+            )
         }
     }
 
@@ -762,6 +765,42 @@ final class DictationPipeline {
         transcriptionClientKey = key
         return client
     }
+
+    /// What to add to an empty cleanup response so it says something the user can act on.
+    ///
+    /// Measured, and the reason this exists: a Mode 2 attempt failed with "The cleanup endpoint
+    /// returned no message content", which reads like a provider outage and was not one. The hold was
+    /// 3.3 s, 1.6 s of it a Bluetooth link opening, so 1.7 s of audio produced the transcript "Ben
+    /// olacak görelim." and the model had nothing to rewrite into a prompt. The same system prompt and
+    /// the same 768-token budget turned a real request into a full structured English prompt on the
+    /// first try, so the feature was working and the input was not there.
+    ///
+    /// Only the empty-response case is annotated. A network error or an HTTP status says what it is,
+    /// and appending guesses about length to those would be noise.
+    nonisolated static func thinTranscriptAdvice(
+        transcript: String,
+        mode: DictationRecord.Mode,
+        error: Error
+    ) -> String {
+        guard case ChatClient.ChatClientError.emptyResponse = error else {
+            return ""
+        }
+
+        let words: Int = transcript.split(whereSeparator: { $0.isWhitespace }).count
+        guard words < thinTranscriptWords else {
+            return ""
+        }
+        guard mode == .prompt else {
+            return " The transcript was only \(words) word(s), which may be too little to clean up."
+        }
+        return " The transcript was only \(words) word(s), which is usually the reason: Mode 2 rewrites "
+            + "what you said into a prompt, and it needs a real request to work from. Hold for longer, "
+            + "and with a Bluetooth microphone leave a beat after pressing before you speak."
+    }
+
+    /// Below this many words, an empty rewrite is far more likely to be a thin transcript than a
+    /// provider fault. The measured failure had three.
+    private nonisolated static let thinTranscriptWords: Int = 8
 
     /// What to add to a quality-gate rejection so it says something the user can act on.
     ///
