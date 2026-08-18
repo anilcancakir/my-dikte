@@ -36,23 +36,30 @@ enum ReasoningSuppression {
     }
 
     /// Gemini models that support the "minimal" thinking level.
+    ///
+    /// **Namespaced, and they were not before.** These were bare ids while this type's own resolution
+    /// rule is that a bare id is treated as unknown, so every Gemini entry was dead: the app addresses
+    /// models the way its provider names them, and OpenRouter names this one
+    /// `google/gemini-3.5-flash-lite`. Nothing failed loudly, the suppression simply never went out.
+    /// Measured against OpenRouter once the ids matched: `reasoning_effort: minimal` is accepted and
+    /// the same cleanup came back in 759 ms rather than 929 ms.
     private static let geminiMinimalThinkingModels: Set<String> = [
-        "gemini-3.6-flash",
-        "gemini-3.5-flash-lite",
-        "gemini-3.5-flash",
-        "gemini-3.1-flash-lite",
+        "google/gemini-3.6-flash",
+        "google/gemini-3.5-flash-lite",
+        "google/gemini-3.5-flash",
+        "google/gemini-3.1-flash-lite",
     ]
 
     /// Gemini models that need "low" because "minimal" is not supported.
     private static let geminiLowThinkingModels: Set<String> = [
-        "gemini-3.7-flash",
-        "gemini-3.1-pro-preview",
+        "google/gemini-3.7-flash",
+        "google/gemini-3.1-pro-preview",
     ]
 
-    /// Gemini 2.5 Flash-Lite is intentionally absent: thinking is already off by default, so it
-    /// needs no suppression parameter at all.
+    /// Gemini 2.5 Flash-Lite is intentionally absent from the two sets above: thinking is already off
+    /// by default, so it needs no suppression parameter at all.
     private static let geminiNoSuppressionNeededModels: Set<String> = [
-        "gemini-2.5-flash-lite"
+        "google/gemini-2.5-flash-lite"
     ]
 
     /// The GPT-5.4 through 5.6 family, which supports an explicit "none" reasoning effort.

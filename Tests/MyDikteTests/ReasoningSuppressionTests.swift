@@ -8,10 +8,10 @@ struct ReasoningSuppressionTests {
     @Test(
         "Gemini models that support the minimal thinking level get it",
         arguments: [
-            "gemini-3.6-flash",
-            "gemini-3.5-flash-lite",
-            "gemini-3.5-flash",
-            "gemini-3.1-flash-lite",
+            "google/gemini-3.6-flash",
+            "google/gemini-3.5-flash-lite",
+            "google/gemini-3.5-flash",
+            "google/gemini-3.1-flash-lite",
         ]
     )
     func geminiMinimalThinkingModels(modelId: String) {
@@ -22,8 +22,8 @@ struct ReasoningSuppressionTests {
     @Test(
         "Gemini models that do not support minimal fall back to low",
         arguments: [
-            "gemini-3.7-flash",
-            "gemini-3.1-pro-preview",
+            "google/gemini-3.7-flash",
+            "google/gemini-3.1-pro-preview",
         ]
     )
     func geminiLowThinkingModels(modelId: String) {
@@ -33,7 +33,7 @@ struct ReasoningSuppressionTests {
 
     @Test("Gemini 2.5 Flash-Lite needs no suppression parameter because thinking is already off")
     func geminiFlashLiteNeedsNothing() {
-        #expect(ReasoningSuppression.parameters(for: "gemini-2.5-flash-lite") == nil)
+        #expect(ReasoningSuppression.parameters(for: "google/gemini-2.5-flash-lite") == nil)
     }
 
     @Test(
