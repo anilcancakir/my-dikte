@@ -55,7 +55,8 @@ struct SettingsPersistenceTests {
             autoInsert: false,
             historyLimit: 25,
             retainAudio: false,
-            audioCuesEnabled: false
+            audioCuesEnabled: false,
+            livePreviewEnabled: false
         )
 
         let data = try JSONEncoder().encode(settings)
@@ -64,6 +65,7 @@ struct SettingsPersistenceTests {
         #expect(decoded == settings)
         #expect(decoded.retainAudio == false)
         #expect(decoded.audioCuesEnabled == false)
+        #expect(decoded.livePreviewEnabled == false)
         #expect(decoded.promptToggleShortcut == settings.promptToggleShortcut)
     }
 
@@ -105,6 +107,14 @@ struct SettingsPersistenceTests {
     func defaultsMatchThePlan() {
         #expect(Settings.default.retainAudio == true)
         #expect(Settings.default.audioCuesEnabled == true)
+    }
+
+    /// The live preview is the feature the user asked for by name, so it is on unless it is turned
+    /// off. Off has to mean off completely: no recogniser created and no authorisation requested.
+    @Test("the live preview defaults to on")
+    func livePreviewDefaultsToOn() {
+        #expect(Settings.default.livePreviewEnabled == true)
+        #expect(PipelineConfiguration(settings: .default).livePreviewEnabled == true)
     }
 
     @Test("a missing settings file loads defaults")

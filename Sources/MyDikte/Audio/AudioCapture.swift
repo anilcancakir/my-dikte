@@ -10,10 +10,10 @@ import Synchronization
 /// `@MainActor` call from that thread traps in `dispatch_assert_queue_fail` (SIGTRAP) and kills
 /// the process. The compiler does not warn about it, so the annotation staying off is the only
 /// guard there is; `references/parakey/swift/Sources/Presspeech/main.swift:2965-2986` records the
-/// same crash. Mutable control-plane state (the engine, the level handler, the configuration
-/// observer) is guarded by `lock`. Everything the tap touches is either captured immutably when
-/// the tap is installed or an atomic, so the callback never waits on that lock, never allocates
-/// and never logs.
+/// same crash. Mutable control-plane state (the engine, the level handler, the buffer sink, the
+/// configuration observer) is guarded by `lock`. Everything the tap touches is either captured
+/// immutably when the tap is installed or an atomic, so the callback never waits on that lock,
+/// never allocates and never logs.
 ///
 /// Warm-up exists because the cold start was measured, not assumed: median 156.4 ms from
 /// `engine.start()` to the first tap buffer, with no warm path and nothing recoverable in
@@ -107,6 +107,7 @@ final class AudioCapture: @unchecked Sendable {
     private let tapState = TapState(rmsCapacity: AudioCapture.rmsCapacity)
     private var engine: AVAudioEngine?
     private var levelHandler: (@Sendable (Float) -> Void)?
+    private var bufferSink: (@Sendable (AVAudioPCMBuffer) -> Void)?
     private var configurationObserver: NSObjectProtocol?
 
     /// Set this before starting; the tap captures the handler when it is installed, so a handler
@@ -116,6 +117,21 @@ final class AudioCapture: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         levelHandler = handler
+    }
+
+    /// Registers a second consumer of the converted 16 kHz mono buffers, for the live preview.
+    ///
+    /// Same contract as `setLevelHandler`, and two hard rules on top of it, because this one is
+    /// handed the audio itself. The buffer is the converter's reused output, so the sink must copy
+    /// what it wants synchronously and must never retain it: the next callback overwrites it. And the
+    /// sink runs on the audio thread, so it may not allocate, may not block on a lock and may not
+    /// touch the main actor; `LivePreview.accept(_:)` is written to that contract.
+    ///
+    /// Set this before starting, like the level handler: the tap captures it when it is installed.
+    func setBufferSink(_ sink: @escaping @Sendable (AVAudioPCMBuffer) -> Void) {
+        lock.lock()
+        defer { lock.unlock() }
+        bufferSink = sink
     }
 
     /// Starts the engine with the tap installed and every buffer discarded, so that
@@ -245,6 +261,7 @@ final class AudioCapture: @unchecked Sendable {
         let state: TapState = tapState
         let spool: AudioSpool = self.spool
         let handler: (@Sendable (Float) -> Void)? = levelHandler
+        let sink: (@Sendable (AVAudioPCMBuffer) -> Void)? = bufferSink
 
         engine.inputNode.installTap(
             onBus: 0,
@@ -287,6 +304,9 @@ final class AudioCapture: @unchecked Sendable {
             // Gain of 15 matches `references/pindrop/.../AudioRecorder.swift:326-372`: speech at
             // a normal distance reads around 0.02 RMS, which without gain is an invisible bar.
             handler?(min(1.0, rms * 15))
+            // Last, and only while keeping, so a warm-up is never fed to the preview recogniser and
+            // nothing here can delay the spool that holds the actual dictation.
+            sink?(converted)
         }
 
         registerConfigurationObserver(for: engine)

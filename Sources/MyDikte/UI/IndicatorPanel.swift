@@ -20,7 +20,12 @@ import SwiftUI
 /// therefore absent on purpose, and adding a control to `IndicatorView` without adding it is how a
 /// later change would produce a panel whose buttons silently do nothing.
 final class IndicatorPanel: NSPanel {
-    private static let panelSize = NSSize(width: 320, height: 56)
+    /// Tall enough for the status row plus two lines of live preview text, and fixed at that size
+    /// whether or not the preview has anything to show. The alternative was resizing the panel when
+    /// the first partial result arrives, which is a visible jump mid-sentence; the pill inside hugs
+    /// its content instead, so the unused part of the panel is transparent and, since
+    /// `ignoresMouseEvents` covers the whole panel, still click-through.
+    private static let panelSize = NSSize(width: 320, height: 96)
 
     /// Distance from the corner of the screen's visible area. `visibleFrame` already excludes the
     /// menu bar and the notch, so the panel needs neither of the reference's notch helpers to stay
@@ -82,6 +87,7 @@ final class IndicatorPanel: NSPanel {
         model.level = 0
         model.elapsed = 0
         model.message = nil
+        model.previewText = ""
         startedAt = ContinuousClock.now
 
         moveToCorner()
@@ -99,12 +105,21 @@ final class IndicatorPanel: NSPanel {
         model.stage = stage
     }
 
+    /// The on-device preview's current text. Display only: it is never read back out of here, and
+    /// nothing downstream of the panel can reach it.
+    func update(previewText: String) {
+        model.previewText = previewText
+    }
+
     /// Ends the run. A message (a failure, a room-tone report, a cancel) keeps the panel up for a
     /// few seconds, because the plan rules out an alert or any modal for a pipeline failure and this
     /// is therefore the only place the reason can be read.
     func endRun(message: String?) {
         stopTicking()
         model.level = 0
+        // The preview belonged to the audio that just stopped, so it goes with it: leaving it up
+        // under a failure message would read as the text that was inserted.
+        model.previewText = ""
 
         guard let message else {
             hide()
@@ -135,6 +150,7 @@ final class IndicatorPanel: NSPanel {
         hideTask?.cancel()
         hideTask = nil
         model.message = nil
+        model.previewText = ""
         model.level = 0
         orderOut(nil)
     }

@@ -27,6 +27,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         registerDebugEntries()
         setUpStatusItem()
         setUpShortcuts()
+        requestSpeechRecognitionIfEnabled()
+    }
+
+    /// Asks for the Speech Recognition grant the live preview needs, at launch rather than during a
+    /// dictation: the system prompt is a window, and one appearing while a push-to-talk chord is held
+    /// would take the focus the dictation is about to be pasted into.
+    ///
+    /// Nothing is asked when the preview is off, which is what makes the setting mean what it says.
+    /// A refusal costs the preview and nothing else, so the result is logged rather than surfaced.
+    private func requestSpeechRecognitionIfEnabled() {
+        guard Settings.load().livePreviewEnabled else {
+            logger.notice("live preview off in settings, so no speech recognition authorisation was requested")
+            return
+        }
+
+        let gate = permissionGate ?? PermissionGate()
+        permissionGate = gate
+        gate.requestSpeechRecognition { [weak self] status in
+            self?.logger.notice(
+                "speech recognition authorisation: \(status.logName, privacy: .public)"
+            )
+        }
     }
 
     /// Swift runs nothing automatically outside `main.swift`, and the toolchain rejects an

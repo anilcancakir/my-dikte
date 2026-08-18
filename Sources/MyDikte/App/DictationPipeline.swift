@@ -42,6 +42,7 @@ struct PipelineConfiguration: Sendable, Equatable {
     let retainAudio: Bool
     let historyLimit: Int
     let audioCuesEnabled: Bool
+    let livePreviewEnabled: Bool
 
     private let cleanupEndpoint: String
     private let rewriteEndpoint: String
@@ -55,6 +56,7 @@ struct PipelineConfiguration: Sendable, Equatable {
         retainAudio = settings.retainAudio
         historyLimit = settings.historyLimit
         audioCuesEnabled = settings.audioCuesEnabled
+        livePreviewEnabled = settings.livePreviewEnabled
         cleanupEndpoint = Self.resolvedEndpoint(settings.cleanupEndpoint)
         rewriteEndpoint = Self.resolvedEndpoint(settings.rewriteEndpoint)
     }
@@ -202,6 +204,12 @@ enum InsertionChoice: Sendable, Equatable {
 /// The orchestrator: it owns the state machine, the stage timing, the failure contract and the
 /// wiring between the pieces Waves 1 to 3 built without any of them knowing about each other.
 ///
+/// It also owns the live preview, and owns it at arm's length: the preview is started when recording
+/// starts, stopped on every path a run can end on, and its text goes straight from `LivePreview` to
+/// the indicator panel. Nothing on this type ever holds it, so `rawTranscript`, `finalText`, the
+/// cleanup call, the paraphrase guard and the clipboard cannot see it. The authoritative transcript
+/// is still Groq's, unchanged.
+///
 /// `@MainActor` because it drives the indicator, the audio cues and the status item. It reaches the
 /// two non-main-actor layers only through their published APIs, and never into `AudioCapture`'s
 /// locked state: the level series arrives with the finished `Recording`, and the live level arrives
@@ -219,6 +227,7 @@ final class DictationPipeline {
 
     private let capture = AudioCapture()
     private let indicator = IndicatorPanel()
+    private let livePreview = LivePreview()
     private let logger = Logger(subsystem: BundleInfo.bundleIdentifier, category: "Pipeline")
 
     private var machine = PipelineStateMachine()
@@ -243,6 +252,17 @@ final class DictationPipeline {
             Task { @MainActor in
                 self?.indicator.update(level: level)
             }
+        }
+        // Also on the render thread, and `accept` is written for it: it copies into a preallocated
+        // slot and wakes its own queue. No hop here, because a hop would have to allocate on the
+        // audio thread to make one.
+        capture.setBufferSink { [livePreview] buffer in
+            livePreview.accept(buffer)
+        }
+        // The preview text goes to the panel and nowhere else. It is never stored on this type, so
+        // there is no path from it to the caret, the clipboard, the cleanup call or the log.
+        livePreview.onPreviewText = { [weak self] text in
+            self?.indicator.update(previewText: text)
         }
     }
 
@@ -311,6 +331,7 @@ final class DictationPipeline {
             warmUpCapture()
         case .cancelWarmUp:
             capture.cancelWarmUp()
+            livePreview.stop()
         case .beginRecording:
             beginRecording()
         case .stopAndProcess:
@@ -318,6 +339,7 @@ final class DictationPipeline {
         case .discardRecording:
             // Same engine and same spool as a warm-up, so this is also the discard path.
             capture.cancelWarmUp()
+            livePreview.stop()
             indicator.endRun(message: "Cancelled")
         case .abortWork:
             // The in-flight request unwinds through its own cancellation path and reports from
@@ -359,6 +381,10 @@ final class DictationPipeline {
 
         indicator.beginRun(stage: .recording)
         AudioCue.play(.recordStart, enabled: configuration.audioCuesEnabled)
+        // After the capture is up and after the cue, so nothing about the preview can sit between
+        // the shortcut and the first recorded buffer. It reports why there is no preview to the log
+        // and returns; there is no failure path from here into the dictation.
+        livePreview.start(isEnabledInSettings: configuration.livePreviewEnabled)
     }
 
     private func beginProcessing(
@@ -399,6 +425,11 @@ final class DictationPipeline {
             if let preCaptured {
                 recording = preCaptured
             } else {
+                // Before the capture stops, so the preview stops hearing at the same instant the
+                // recording does, and before the clock starts, so an atomic exchange and one async
+                // dispatch cannot land in `captureMs`. The teardown runs on the preview's own queue
+                // and nothing here waits for it.
+                livePreview.stop()
                 let started = ContinuousClock.now
                 recording = try capture.stop()
                 timings.record(.capture, seconds: Self.elapsed(since: started))
@@ -649,6 +680,10 @@ final class DictationPipeline {
     }
 
     private func finish(message: String?, isFailure: Bool) {
+        // The backstop, not the primary: a run that reached its audio has already stopped the preview
+        // above, and this covers anything that ends some other way, including a failure thrown before
+        // that point. `stop()` is idempotent, so the normal path pays one atomic exchange here.
+        livePreview.stop()
         _ = machine.handle(.runEnded)
         indicator.endRun(message: message)
         publishStage()
@@ -663,6 +698,7 @@ final class DictationPipeline {
     /// A failure with no run behind it (a warm-up that could not start, a capture that never
     /// began). Same channel as `finish`, minus the state transition.
     private func report(failure message: String) {
+        livePreview.stop()
         indicator.endRun(message: message)
         logger.error("\(message, privacy: .public)")
         onFailure(message)

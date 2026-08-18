@@ -73,6 +73,9 @@ struct Settings: Codable, Equatable {
     var historyLimit: Int
     var retainAudio: Bool
     var audioCuesEnabled: Bool
+    /// The on-device live preview in the indicator while recording. On unless it is turned off:
+    /// it costs no API call and no network, and it is the feature the user asked for by name.
+    var livePreviewEnabled: Bool
 
     static let `default` = Settings(
         pushToTalkChord: .unset,
@@ -88,7 +91,8 @@ struct Settings: Codable, Equatable {
         autoInsert: true,
         historyLimit: 50,
         retainAudio: true,
-        audioCuesEnabled: true
+        audioCuesEnabled: true,
+        livePreviewEnabled: true
     )
 }
 

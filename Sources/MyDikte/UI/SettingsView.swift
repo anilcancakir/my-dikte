@@ -511,6 +511,17 @@ private struct BehaviourPane: View {
             Toggle("Play the start and stop cues", isOn: $settings.audioCuesEnabled)
                 .onChange(of: settings.audioCuesEnabled) { _, _ in onChange() }
 
+            Toggle("Show the words as you speak (on device)", isOn: $settings.livePreviewEnabled)
+                .onChange(of: settings.livePreviewEnabled) { _, _ in onChange() }
+
+            Text("The live preview is Apple's on-device Turkish recogniser, so no audio leaves the "
+                + "machine and it costs no API call. It has no punctuation and is thrown away: the "
+                + "text that lands at the caret is always the transcribed and cleaned one. Off means "
+                + "no recogniser is created and no authorisation is requested.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
             Stepper(
                 "History limit: \(settings.historyLimit)",
                 value: $settings.historyLimit,

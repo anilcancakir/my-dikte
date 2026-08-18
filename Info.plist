@@ -22,6 +22,8 @@
 	<true/>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>MyDikte shows the words as you speak them, using Apple's on-device speech recogniser. This preview is discarded; the text inserted at the caret comes from the transcription service.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>MyDikte records audio while you hold the dictation shortcut, then transcribes it for insertion at the caret.</string>
 </dict>

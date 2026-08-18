@@ -1,6 +1,7 @@
 import ApplicationServices
 import Carbon.HIToolbox
 import Foundation
+import Speech
 import os
 
 /// Reports whether the keyboard surface can actually work, and why not when it cannot.
@@ -10,6 +11,10 @@ import os
 /// transient session state: while it holds, a tap stops seeing KeyDown and KeyUp (FlagsChanged keeps
 /// flowing, which is why the chord is modifier-only), so a keyed shortcut can look broken when it is
 /// merely blocked. The menu bar reads both from here rather than guessing.
+///
+/// Speech Recognition sits here too rather than next to the recogniser, because it is a TCC grant
+/// like the other two and this is the one place that asks macOS for one. It gates the live preview
+/// only; refusing it costs a preview, never a dictation.
 ///
 /// `@MainActor` because this is the type the UI reads, and because the Accessibility prompt puts a
 /// window on screen.
@@ -82,6 +87,54 @@ final class PermissionGate {
         let trusted: Bool = AXIsProcessTrustedWithOptions(options)
         accessibilityState = trusted ? .granted : .notGranted
         return accessibilityState
+    }
+
+    // MARK: - Speech recognition, for the live preview only
+
+    /// What macOS currently says about Speech Recognition for this app. The framework's own enum
+    /// rather than a second one: it already distinguishes denied from restricted from unresolved,
+    /// and `LivePreview.readiness` reads exactly these values.
+    var speechRecognitionStatus: SFSpeechRecognizerAuthorizationStatus {
+        SFSpeechRecognizer.authorizationStatus()
+    }
+
+    /// Asks macOS for the Speech Recognition grant, showing the system prompt when the status is
+    /// still unresolved, and reports what came back.
+    ///
+    /// Requested at launch rather than at the first dictation on purpose: the prompt is a window, and
+    /// a window appearing while a push-to-talk chord is held would take the focus the dictation is
+    /// about to be pasted into.
+    ///
+    /// Three things about the platform are load-bearing here, and the second one killed this process
+    /// once before the annotation went on.
+    ///
+    /// `requestAuthorization` **crashes** when `NSSpeechRecognitionUsageDescription` is missing from
+    /// `Info.plist`, so it is only called when the status is genuinely unresolved and the key is
+    /// verified in the signed bundle.
+    ///
+    /// Its handler is an imported Objective-C block, which is **not** `Sendable`, so a closure written
+    /// inside this `@MainActor` type inherits main-actor isolation and Swift 6 inserts a runtime
+    /// executor check at its entry. TCC replies on `com.apple.root.default-qos`, that check fails, and
+    /// `dispatch_assert_queue_fail` takes the whole app down the moment the user answers the prompt
+    /// (measured: `MyDikte-2026-08-18-180545.ips`, SIGTRAP in this closure). `@Sendable` on the
+    /// closure is what makes it nonisolated, and the hop back is explicit.
+    ///
+    /// The hop is `Task { @MainActor in }` rather than `MainActor.assumeIsolated`: this fires once and
+    /// needs no ordering, and an assumption about the caller's queue is exactly what just crashed.
+    func requestSpeechRecognition(
+        completion: @escaping @MainActor @Sendable (SFSpeechRecognizerAuthorizationStatus) -> Void
+    ) {
+        let status: SFSpeechRecognizerAuthorizationStatus = speechRecognitionStatus
+        guard status == .notDetermined else {
+            completion(status)
+            return
+        }
+
+        SFSpeechRecognizer.requestAuthorization { @Sendable granted in
+            Task { @MainActor in
+                completion(granted)
+            }
+        }
     }
 
     /// Starts watching for a grant arriving while the app runs, and calls `onChange` on every
