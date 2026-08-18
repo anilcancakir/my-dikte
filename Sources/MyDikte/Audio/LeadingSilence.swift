@@ -39,6 +39,24 @@ enum LeadingSilence {
     /// clipped by trimming up to its edge.
     static let preRollSeconds: Double = 0.15
 
+    /// How long audio has to stay audible before it counts as the real start of the recording.
+    ///
+    /// Without this the rule looked only for the first audible chunk, and a measured AirPods recording
+    /// defeated it: 250 ms of audio at -7 dBFS, then a full second of exact zeros, then the speech. The
+    /// opening burst is the link engaging, not a word, and sending it verbatim to Groq returned
+    /// "Altyazı M.K.", the stock phrase for silence, which is how we know it carries no speech. Because
+    /// that burst was "audible", nothing was trimmed and the dead gap went to the API.
+    ///
+    /// Safe against real pauses in speech, and for a specific reason: a pause on an open microphone
+    /// still carries a noise floor and stays above `silenceRMS`, while a link that has not opened
+    /// reports exactly zero. So this only ever skips a fragment followed by genuinely dead air.
+    ///
+    /// Set to twice the one burst that has been measured, which was 250 ms. Calibrated on a single
+    /// observation, so it is stated rather than implied: a longer engage-burst on some other device
+    /// would pass this test and reach the API. The safe direction to move it is up, because a run is
+    /// only broken by exact zeros, and real speech never contains those.
+    static let sustainSeconds: Double = 0.5
+
     /// How many seconds to drop from the front of a recording, or `0` when nothing should be dropped.
     ///
     /// - Parameters:
@@ -50,10 +68,10 @@ enum LeadingSilence {
             return 0
         }
 
-        guard let firstAudible: Int = chunkRMS.firstIndex(where: { $0 > silenceRMS }) else {
-            // Silent throughout. Trimming would leave the VAD nothing to measure and the log nothing
-            // to report, and the correct outcome for this recording is a room-tone rejection, not a
-            // shortened file.
+        guard let firstAudible: Int = firstSustainedIndex(chunkRMS, chunkSeconds: chunkSeconds) else {
+            // Nothing sustained anywhere: either silent throughout, or nothing but fragments. Trimming
+            // would leave the VAD nothing to measure and the log nothing to report, and the correct
+            // outcome for such a recording is a room-tone rejection rather than a shortened file.
             return 0
         }
 
@@ -63,5 +81,31 @@ enum LeadingSilence {
         }
 
         return min(maximumTrimSeconds, silentSeconds - preRollSeconds)
+    }
+
+    /// The first index from which the signal stays above `silenceRMS` for at least `sustainSeconds`,
+    /// or `nil` when no such run exists.
+    ///
+    /// This is what separates the real start of a recording from a fragment: an isolated audible chunk
+    /// followed by dead air is the microphone link engaging, not speech.
+    private static func firstSustainedIndex(_ chunkRMS: [Double], chunkSeconds: Double) -> Int? {
+        let needed: Int = max(1, Int((sustainSeconds / chunkSeconds).rounded(.up)))
+        var run = 0
+
+        for (index, rms) in chunkRMS.enumerated() {
+            guard rms > silenceRMS else {
+                run = 0
+                continue
+            }
+            run += 1
+            if run >= needed {
+                return index - run + 1
+            }
+        }
+
+        // A run that reaches the end of the recording without meeting the threshold still counts when it
+        // is all there is: a recording shorter than `sustainSeconds` of audio has no longer run to find,
+        // and rejecting it here would mean never trimming a very short dictation.
+        return run > 0 ? chunkRMS.count - run : nil
     }
 }

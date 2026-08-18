@@ -78,6 +78,42 @@ struct LeadingSilenceTests {
         #expect(LeadingSilence.secondsToTrim(chunkRMS: [], chunkSeconds: Self.chunkSeconds) == 0)
     }
 
+    /// The second measured AirPods pattern, and the one that defeated the first version of this rule:
+    /// 250 ms of audio at -7 dBFS, then a full second of exact zeros, then the speech. Sending that
+    /// opening burst to Groq on its own returned "Altyazı M.K.", the stock phrase for silence, which is
+    /// how we know it is the link engaging and not a word. Because it was "audible", a rule that looked
+    /// for the first audible chunk trimmed nothing and the dead gap reached the API.
+    @Test("an opening burst followed by dead air is skipped, not treated as the start")
+    func openingBurstFollowedByDeadAirIsSkipped() {
+        // 3 chunks of burst (about 255 ms), 12 chunks of exact zero (about 1.0 s), then speech.
+        let chunks = Array(repeating: 0.06, count: 3)
+            + Array(repeating: 0.0, count: 12)
+            + Array(repeating: 0.05, count: 40)
+
+        let trimmed = LeadingSilence.secondsToTrim(chunkRMS: chunks, chunkSeconds: Self.chunkSeconds)
+        // The real speech starts at chunk 15, about 1.28 s in, and the trim stops a pre-roll short.
+        #expect(trimmed > 1.0)
+        #expect(trimmed < 15 * Self.chunkSeconds)
+    }
+
+    /// The guard against the previous test's rule going too far: a brief closure inside real speech must
+    /// not be read as dead air, or the trim would eat the first word of every sentence with a stop
+    /// consonant in it. This is why the threshold is digital silence and not a noise floor.
+    @Test("a brief dip inside speech does not restart the search")
+    func briefDipInsideSpeechIsNotDeadAir() {
+        // Speech with one quieter chunk that still carries a noise floor, as an open microphone does.
+        let chunks = [0.05, 0.05, 0.0008, 0.05, 0.05, 0.05, 0.05, 0.05]
+        #expect(LeadingSilence.secondsToTrim(chunkRMS: chunks, chunkSeconds: Self.chunkSeconds) == 0)
+    }
+
+    @Test("a recording of only fragments and dead air is left for the VAD to reject")
+    func fragmentsOnlyAreLeftAlone() {
+        let chunks = [0.06, 0.0, 0.0, 0.0, 0.06, 0.0, 0.0, 0.0, 0.0, 0.0]
+        let trimmed = LeadingSilence.secondsToTrim(chunkRMS: chunks, chunkSeconds: Self.chunkSeconds)
+        // Whatever it decides, it must not remove so much that the VAD has nothing left to measure.
+        #expect(trimmed < Double(chunks.count) * Self.chunkSeconds)
+    }
+
     @Test("a zero chunk duration cannot produce a trim, since the seconds are unknowable")
     func zeroChunkDurationTrimsNothing() {
         let chunks = Array(repeating: 0.0, count: 22) + Array(repeating: 0.05, count: 60)
