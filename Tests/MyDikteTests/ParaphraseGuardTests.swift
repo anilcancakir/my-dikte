@@ -213,6 +213,48 @@ struct ParaphraseGuardTests {
         #expect(ParaphraseGuard.check(raw: raw, cleaned: cleaned, glossary: []) == .accept)
     }
 
+    /// Third measured instance, and it defeated the equal-length version of the phonetic rule. The user
+    /// said "optimize", Whisper heard "optimizir", cleanup repaired it, and the guard rejected the whole
+    /// cleanup because the skeletons differ in length: "ptmzr" against "ptmz". A repair routinely adds or
+    /// drops a consonant, so the comparison has to allow an insertion or a deletion and not only a
+    /// substitution.
+    @Test("a repair that drops a trailing consonant is accepted")
+    func repairChangingSkeletonLengthIsAccepted() {
+        let result = ParaphraseGuard.check(
+            raw: "bu sistem verilen metni Opus 5 için optimizir hale getirmek için nasıl çalışıyor",
+            cleaned: "Bu sistem verilen metni Opus 5 için optimize hale getirmek için nasıl çalışıyor?",
+            glossary: []
+        )
+        #expect(result == .accept)
+    }
+
+    @Test("a repair within one consonant of what was heard is accepted")
+    func oneConsonantRepairIsAccepted() {
+        let result = ParaphraseGuard.check(
+            raw: "bunu kubernetis üzerinde çalıştırdım ve bütün loglara baktım",
+            cleaned: "Bunu Kubernetes üzerinde çalıştırdım ve bütün loglara baktım.",
+            glossary: []
+        )
+        #expect(result == .accept)
+    }
+
+    /// A known and accepted limit, recorded rather than papered over. "komit" to "commit" is two edits
+    /// on the skeleton (`kmt` to `cmmt`: one substitution and one insertion), so the one-edit rule
+    /// rejects it. Widening to two edits would start admitting real substitutions, and the glossary
+    /// already licenses a term outright, so the answer for a term mangled this far is to name it in the
+    /// glossary rather than to loosen the guard for everyone.
+    @Test("a repair two consonants away is still rejected, and the glossary is the way through")
+    func twoConsonantRepairNeedsTheGlossary() {
+        let raw = "dosyayı komit ettim ve sonra pushladım hepsini"
+        let cleaned = "Dosyayı commit ettim ve sonra pushladım hepsini."
+
+        guard case .reject = ParaphraseGuard.check(raw: raw, cleaned: cleaned, glossary: []) else {
+            Issue.record("expected .reject without a glossary")
+            return
+        }
+        #expect(ParaphraseGuard.check(raw: raw, cleaned: cleaned, glossary: ["commit"]) == .accept)
+    }
+
     /// The counterpart, and the reason the exemption cannot simply allow any single new word: this is the
     /// substitution the introduced-word check was built for, and it must still be caught. "again" sounds
     /// nothing like "yine", so a phonetic rule separates the two cases where a word count cannot.

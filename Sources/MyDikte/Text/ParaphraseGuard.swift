@@ -206,12 +206,45 @@ public enum ParaphraseGuard {
         let left: String = consonantSkeleton(candidate)
         let right: String = consonantSkeleton(spoken)
 
-        guard left.count >= minimumSkeletonLength, left.count == right.count else {
+        guard left.count >= minimumSkeletonLength, right.count >= minimumSkeletonLength else {
             return false
         }
-        return zip(left, right).reduce(into: 0) { differences, pair in
-            differences += pair.0 == pair.1 ? 0 : 1
-        } <= 1
+        return withinOneEdit(Array(left), Array(right))
+    }
+
+    /// Whether one skeleton reaches the other in at most a single substitution, insertion or deletion.
+    ///
+    /// An equal-length comparison was the first version and a real dictation defeated it: "optimizir"
+    /// and "optimize" reduce to `ptmzr` and `ptmz`, so a repair that drops one consonant looked like an
+    /// invented word. Insertions and deletions are as much a part of mishearing as substitutions.
+    private static func withinOneEdit(_ left: [Character], _ right: [Character]) -> Bool {
+        guard abs(left.count - right.count) <= 1 else {
+            return false
+        }
+
+        let (shorter, longer) = left.count <= right.count ? (left, right) : (right, left)
+        var shortIndex = 0
+        var longIndex = 0
+        var edited = false
+
+        while shortIndex < shorter.count, longIndex < longer.count {
+            guard shorter[shortIndex] != longer[longIndex] else {
+                shortIndex += 1
+                longIndex += 1
+                continue
+            }
+            guard !edited else {
+                return false
+            }
+            edited = true
+            // Same length means the mismatch was a substitution, so both sides advance. Different
+            // lengths mean the extra character belongs to the longer one, so only it advances.
+            if shorter.count == longer.count {
+                shortIndex += 1
+            }
+            longIndex += 1
+        }
+        return true
     }
 
     /// The word with its vowels dropped, which is the part a recogniser gets right when it mishears.
