@@ -418,6 +418,10 @@ final class DictationPipeline {
         let timestamp = Date()
         var timings = StageTimings()
         var temporaryFiles: [URL] = []
+        // Declared out here so the failure path can say how much audio actually reached the model.
+        // A rejection quoting only a log-probability tells the user nothing they can act on, and the
+        // commonest cause of one is a hold that was too short once the Bluetooth lead-in came off.
+        var sentAudioSeconds: Double = 0
 
         do {
             // 1. Finish the capture and take the per-chunk level series with it.
@@ -492,6 +496,7 @@ final class DictationPipeline {
                     "trimming \(String(format: "%.2f", leadingSilence), privacy: .public) s of leading silence"
                 )
             }
+            sentAudioSeconds = max(0, recording.duration - leadingSilence)
             let encodeStarted = ContinuousClock.now
             let audioData: Data = try await Task.detached(priority: .userInitiated) {
                 try AudioEncoder.encodeM4A(
@@ -605,21 +610,24 @@ final class DictationPipeline {
             // successful line. This branch exists because a real rejection reached the user as one
             // sentence and left nothing behind, so the threshold that produced it could not be
             // checked against anything.
+            var message: String = error.localizedDescription
             if case ProviderError.lowQualityTranscript(let reason, let transcript) = error {
+                let advice: String = Self.shortAudioAdvice(seconds: sentAudioSeconds)
+                message = "\(error.localizedDescription)\(advice)"
                 appendRecord(
                     timestamp: timestamp,
                     mode: mode,
                     audioPath: nil,
-                    duration: 0,
+                    duration: sentAudioSeconds,
                     rawTranscript: transcript,
                     finalText: "",
-                    reason: "Transcription rejected by the quality gate: \(reason)",
+                    reason: "Transcription rejected by the quality gate: \(reason)\(advice)",
                     timings: timings.record(totalSeconds: Self.elapsed(since: releasedAt)),
                     configuration: configuration
                 )
             }
             remove(temporaryFiles)
-            finish(message: error.localizedDescription, isFailure: true)
+            finish(message: message, isFailure: true)
         }
     }
 
@@ -754,6 +762,27 @@ final class DictationPipeline {
         transcriptionClientKey = key
         return client
     }
+
+    /// What to add to a quality-gate rejection so it says something the user can act on.
+    ///
+    /// The gate reports a log-probability, which is the right thing to record and the wrong thing to
+    /// show on its own. Measured on a real Mode 2 attempt: a 3.5 s hold, 1.13 s of it a Bluetooth link
+    /// opening, left 2.4 s of audio, and the model returned four unlikely words at an `avg_logprob` of
+    /// -1.64 against a -1.0 limit. The number was correct and unactionable; the length was the cause.
+    nonisolated static func shortAudioAdvice(seconds: Double) -> String {
+        guard seconds > 0 else {
+            return ""
+        }
+        let measured = String(format: "%.1f", seconds)
+        guard seconds < shortAudioSeconds else {
+            return " Audio sent: \(measured) s."
+        }
+        return " Only \(measured) s of audio reached the model, which is usually the reason: hold for "
+            + "longer, and with a Bluetooth microphone leave a beat after pressing before you speak."
+    }
+
+    /// Below this, a rejection is far more likely to be a short hold than a bad model.
+    private nonisolated static let shortAudioSeconds: Double = 4.0
 
     /// Why this capture cannot be analysed at all, or `nil` when it produced audio.
     ///

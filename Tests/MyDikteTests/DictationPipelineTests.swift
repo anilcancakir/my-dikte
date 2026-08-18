@@ -354,3 +354,29 @@ struct PipelineConfigurationTests {
         #expect(measuredCase > 132)
     }
 }
+
+/// A quality-gate rejection reports a log-probability, which is the right thing to record and the
+/// wrong thing to show alone. Measured on a real Mode 2 attempt: a 3.5 s hold, 1.13 s of it a
+/// Bluetooth link opening, left 2.4 s of audio and an `avg_logprob` of -1.64 against a -1.0 limit.
+/// The number was correct and unactionable; the length was the cause.
+@Suite("Short audio advice")
+struct ShortAudioAdviceTests {
+    @Test("a short clip is told the length and what to do about it")
+    func shortClipGetsAdvice() {
+        let advice = DictationPipeline.shortAudioAdvice(seconds: 2.4)
+        #expect(advice.contains("2.4"))
+        #expect(advice.contains("hold for"))
+    }
+
+    @Test("a long clip is given its length without being told to hold longer, since that is not the cause")
+    func longClipIsNotToldToHoldLonger() {
+        let advice = DictationPipeline.shortAudioAdvice(seconds: 18.0)
+        #expect(advice.contains("18.0"))
+        #expect(advice.contains("hold for") == false)
+    }
+
+    @Test("an unknown length adds nothing rather than inventing a number")
+    func unknownLengthAddsNothing() {
+        #expect(DictationPipeline.shortAudioAdvice(seconds: 0) == "")
+    }
+}
