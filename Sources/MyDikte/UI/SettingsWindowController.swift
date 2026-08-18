@@ -43,16 +43,24 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     /// The activation-policy flip to `.regular` happens first: an `.accessory` app cannot become
     /// key, and a menu-bar app with no Dock icon has no other way for its settings window to
     /// receive keyboard focus. `references/VoiceInk/VoiceInk/WindowManager.swift:26-42` is the
-    /// pattern this follows.
+    /// pattern this follows. `WindowActivationPolicy.track` registers this window so that closing
+    /// the History window while this one is still open does not demote the app out from under it.
     func show() {
+        guard let window else {
+            return
+        }
+        WindowActivationPolicy.track(window)
         NSApplication.shared.setActivationPolicy(.regular)
         NSApplication.shared.activate(ignoringOtherApps: true)
-        window?.makeKeyAndOrderFront(nil)
+        window.makeKeyAndOrderFront(nil)
     }
 
-    /// Flips back to `.accessory` so the Dock icon does not linger once the settings window
-    /// closes, matching the same VoiceInk pattern in reverse.
+    /// Defers the `.accessory` demotion to `WindowActivationPolicy`, which only flips back once
+    /// no other window still requires `.regular`.
     func windowWillClose(_ notification: Notification) {
-        NSApplication.shared.setActivationPolicy(.accessory)
+        guard let window else {
+            return
+        }
+        WindowActivationPolicy.untrackAndDemoteIfNeeded(window)
     }
 }

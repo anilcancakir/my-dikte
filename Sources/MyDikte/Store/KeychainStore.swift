@@ -5,12 +5,25 @@ import Security
 /// for `kSecClassGenericPassword` items, one per account name, scoped to this app's bundle
 /// identifier as the Keychain service.
 ///
-/// Every item is written with `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, which Apple
-/// documents as the accessibility class recommended for items a background application must
-/// read: this app reads a stored API key from a menu-bar process that has no foreground window,
-/// so the foreground-only `...WhenUnlockedThisDeviceOnly` class would fail exactly the reads this
-/// app needs. Nothing here sets `kSecAttrSynchronizable`, so a stored value never leaves this
-/// device through iCloud Keychain sync. Following
+/// Every item is written with `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`. That attribute
+/// is set on every call below, but none of the queries here set `kSecUseDataProtectionKeychain`,
+/// so on macOS these calls land in the legacy, file-based Keychain, where `kSecAttrAccessible` is
+/// not enforced: it is recorded, not honoured. Using the data protection keychain instead was
+/// measured directly rather than assumed. A throwaway binary signed with this app's own identity
+/// and entitlements (`entitlements.plist`, Apple Development, Hardened Runtime, no
+/// application-identifier or keychain-sharing entitlement, no provisioning profile) called
+/// `SecItemAdd` with `kSecUseDataProtectionKeychain: true` and got back `errSecMissingEntitlement`
+/// (-34018): the data protection keychain requires one of those two entitlements regardless of
+/// accessibility class, and this signature carries neither. Full commands and verbatim output are
+/// in `.ac/plans/my-dikte-swift-macos/evidence/step-10-keychain-probe.txt`. So this app's actual
+/// guarantee is narrower than the accessibility class name implies: the accessibility class is
+/// inert, and what actually gates a read without a prompt is the file keychain's per-item ACL. An
+/// item this app creates itself through its own `SecItemAdd` enters that ACL under this app's own
+/// identity and reads back silently. An item created out of band, by `/usr/bin/security` or
+/// another tool, carries that tool's identity in its ACL instead, and the first read through this
+/// app then blocks on a Keychain authorisation prompt (observed here as a 65-second stall) until
+/// the user grants it. Nothing here sets `kSecAttrSynchronizable`, so a stored value never leaves
+/// this device through iCloud Keychain sync. Following
 /// `references/VoiceInk/VoiceInk/Services/KeychainService.swift:1-247` for the wrapper shape and
 /// the three-way read result, trimmed to the single accessibility class and the single, non-
 /// syncing Keychain namespace this app actually uses.

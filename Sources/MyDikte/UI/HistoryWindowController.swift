@@ -40,16 +40,26 @@ final class HistoryWindowController: NSWindowController, NSWindowDelegate {
     }
 
     /// Opens the window with a freshly loaded list and gives it focus.
+    ///
+    /// `WindowActivationPolicy.track` registers this window so that closing the Settings window
+    /// while this one is still open does not demote the app out from under it.
     func show() {
-        window?.contentView = NSHostingView(rootView: HistoryView())
+        guard let window else {
+            return
+        }
+        window.contentView = NSHostingView(rootView: HistoryView())
+        WindowActivationPolicy.track(window)
         NSApplication.shared.setActivationPolicy(.regular)
         NSApplication.shared.activate(ignoringOtherApps: true)
-        window?.makeKeyAndOrderFront(nil)
+        window.makeKeyAndOrderFront(nil)
     }
 
-    /// Flips back to `.accessory` so the Dock icon does not linger once the History window
-    /// closes, matching `SettingsWindowController`'s reverse of the same flip.
+    /// Defers the `.accessory` demotion to `WindowActivationPolicy`, which only flips back once
+    /// no other window still requires `.regular`.
     func windowWillClose(_ notification: Notification) {
-        NSApplication.shared.setActivationPolicy(.accessory)
+        guard let window else {
+            return
+        }
+        WindowActivationPolicy.untrackAndDemoteIfNeeded(window)
     }
 }
