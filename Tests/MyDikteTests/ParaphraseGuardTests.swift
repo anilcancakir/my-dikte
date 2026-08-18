@@ -169,6 +169,53 @@ struct ParaphraseGuardTests {
     /// The natural shape of the measured failure, at dictation length: a run-together form that
     /// cleanup separates into a word plus its postposition, where the postposition is not a
     /// substring of the raw word and so the substring rule cannot account for it.
+    /// The second measured instance of the same failure, from a real dictation on 2026-08-18. The user
+    /// said "Speech to Text" twice; Whisper heard "Spish to Text"; the cleanup model repaired both,
+    /// which is exactly what its prompt asks it to do; and this guard rejected the whole cleanup on the
+    /// word "speech", so the user received the raw transcript with the error still in it.
+    ///
+    /// What separates that from the failure this check exists for: a repair replaces a mangled form with
+    /// something that sounds like it, which is why the recogniser made the error in the first place. A
+    /// translation replaces a real word with a foreign one that sounds nothing like it.
+    @Test("a misheard technical term repaired into its real spelling is accepted")
+    func phoneticRepairIsAccepted() {
+        let result = ParaphraseGuard.check(
+            raw: "bizim kullandığımız sistem sadece Spish to Text mi yapıyor yoksa prompt haline de getiriyor mu",
+            cleaned: "Bizim kullandığımız sistem sadece Speech to Text mi yapıyor, yoksa prompt haline de getiriyor mu?",
+            glossary: []
+        )
+        #expect(result == .accept)
+    }
+
+    /// The counterpart, and the reason the exemption cannot simply allow any single new word: this is the
+    /// substitution the introduced-word check was built for, and it must still be caught. "again" sounds
+    /// nothing like "yine", so a phonetic rule separates the two cases where a word count cannot.
+    @Test("a Turkish word translated into English is still rejected")
+    func translationIsStillRejected() {
+        let result = ParaphraseGuard.check(
+            raw: "yine aynı hatayı aldım ve bütün testleri baştan çalıştırdım",
+            cleaned: "again aynı hatayı aldım ve bütün testleri baştan çalıştırdım",
+            glossary: []
+        )
+        guard case .reject = result else {
+            Issue.record("expected .reject, got \(result)")
+            return
+        }
+    }
+
+    @Test("a word with no phonetic relation to anything spoken is still rejected")
+    func unrelatedInventionIsStillRejected() {
+        let result = ParaphraseGuard.check(
+            raw: "toplantıyı perşembeye alalım ve notları herkese gönderelim",
+            cleaned: "toplantıyı perşembeye alalım ve faturaları herkese gönderelim",
+            glossary: []
+        )
+        guard case .reject = result else {
+            Issue.record("expected .reject, got \(result)")
+            return
+        }
+    }
+
     @Test("a run-together form separated into a word plus its postposition is accepted")
     func separatedPostpositionFromRunTogetherFormIsAccepted() {
         let result = ParaphraseGuard.check(

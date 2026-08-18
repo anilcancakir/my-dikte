@@ -124,6 +124,9 @@ public enum ParaphraseGuard {
             if rawStems.contains(where: { $0.contains(word) || word.contains($0) }) {
                 continue
             }
+            if rawStems.contains(where: { soundsLike(word, $0) }) {
+                continue
+            }
             return word
         }
         return nil
@@ -173,6 +176,43 @@ public enum ParaphraseGuard {
             .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
             .map(String.init)
     }
+
+    /// Whether `candidate` is close enough to `spoken` to be a repair of it rather than a replacement.
+    ///
+    /// The cleanup prompt explicitly asks the model to fix technical terms the recogniser got wrong, and
+    /// this is what tells that apart from a translation. A repair replaces a mangled form with something
+    /// that sounds like it, because sounding alike is why the recogniser erred: measured on a real
+    /// dictation, "Spish to Text" became "Speech to Text" and the whole cleanup was rejected on the word
+    /// "speech". A translation replaces a real word with a foreign one that sounds nothing like it, which
+    /// is the failure this check exists for: "yine" becoming "again".
+    ///
+    /// Compared on consonant skeletons, because the vowels are exactly what a recogniser gets wrong:
+    /// "spish" and "speech" are both `spsh`/`spch`, one position apart, while "yine" and "again" are
+    /// `yn` and `gn`. Both differ in one position, so length is what separates them, and the floor is
+    /// deliberate: a two-consonant skeleton carries too little to distinguish a repair from a
+    /// substitution, so short words stay rejected and only a longer word can earn this exemption.
+    private static func soundsLike(_ candidate: String, _ spoken: String) -> Bool {
+        let left: String = consonantSkeleton(candidate)
+        let right: String = consonantSkeleton(spoken)
+
+        guard left.count >= minimumSkeletonLength, left.count == right.count else {
+            return false
+        }
+        return zip(left, right).reduce(into: 0) { differences, pair in
+            differences += pair.0 == pair.1 ? 0 : 1
+        } <= 1
+    }
+
+    /// The word with its vowels dropped, which is the part a recogniser gets right when it mishears.
+    /// `ı` and `i` are both vowels in Turkish and both go, as do the `â` class of borrowed forms.
+    private static func consonantSkeleton(_ word: String) -> String {
+        String(word.filter { !"aeıioöuüâîû".contains($0) })
+    }
+
+    /// Below this many consonants a word cannot earn the phonetic exemption. Chosen so that "yn"
+    /// against "gn", the substitution this check was built to catch, stays rejected while "spsh"
+    /// against "spch" passes.
+    private static let minimumSkeletonLength: Int = 3
 
     /// Turkish clitics and postpositions that speech runs together with the preceding word and
     /// writing separates, so cleanup legitimately splits one off without inventing anything.
