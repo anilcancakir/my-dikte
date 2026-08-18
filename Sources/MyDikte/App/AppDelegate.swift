@@ -11,7 +11,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // policy here too makes accessory mode hold however the binary was actually launched
         // (for example, directly from the built .build/debug path during development).
         NSApplication.shared.setActivationPolicy(.accessory)
+        registerDebugEntries()
         setUpStatusItem()
+    }
+
+    /// Swift runs nothing automatically outside `main.swift`, and the toolchain rejects an
+    /// Objective-C `+load` class method, so a `DebugMenu+<Area>.swift` file cannot register
+    /// itself. Every area's registrar therefore needs one call from here, and this is the only
+    /// place in the app that may make it: four parallel workers each adding their own
+    /// `applicationDidFinishLaunching` would be four duplicate declarations.
+    ///
+    /// Registration runs before the status item is built, but that is not load-bearing: the
+    /// Debug submenu populates in `menuNeedsUpdate(_:)`, so an entry registered later would
+    /// still appear.
+    private func registerDebugEntries() {
+        guard DebugMenu.isEnabled else {
+            return
+        }
+        DebugMenuAudio.register()
+        DebugMenuHotkeys.register()
+        DebugMenuStore.register()
+        DebugMenuOutput.register()
     }
 
     private func setUpStatusItem() {
