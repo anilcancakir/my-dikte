@@ -623,3 +623,40 @@ struct LatchedRecordingTests {
         }
     }
 }
+
+/// The "speak now" cue fires on a level reading rather than on the call that starts the engine,
+/// because those are 1.5 s apart on a Bluetooth microphone and the user asked for the later one.
+@Suite("Microphone live cue")
+struct MicrophoneLiveCueTests {
+    @Test("exact zeros are not a live microphone, which is what a Bluetooth link reports before it opens")
+    func exactZerosAreNotLive() {
+        #expect(DictationPipeline.isMicrophoneLive(level: 0.0) == false)
+    }
+
+    @Test("the threshold is the leading-trim silence floor carried through the level gain")
+    func thresholdMatchesTheSilenceFloor() {
+        let floor = Float(LeadingSilence.silenceRMS) * AudioCapture.levelGain
+
+        #expect(DictationPipeline.isMicrophoneLive(level: floor) == false)
+        #expect(DictationPipeline.isMicrophoneLive(level: floor * 1.01) == true)
+    }
+
+    @Test("room tone counts as live, so the cue fires on breath rather than waiting for a word")
+    func roomToneCountsAsLive() {
+        // 0.0008 raw is what a quiet room measured at, against 0.0 for a link that is not open.
+        #expect(DictationPipeline.isMicrophoneLive(level: 0.0008 * AudioCapture.levelGain) == true)
+    }
+
+    @Test("speech at a normal distance is comfortably live")
+    func speechIsLive() {
+        // 0.02 raw is the figure the level gain itself was chosen against.
+        #expect(DictationPipeline.isMicrophoneLive(level: 0.02 * AudioCapture.levelGain) == true)
+    }
+
+    @Test("the two cues are distinct cases, since telling them apart by ear is the whole point")
+    func theTwoCuesAreDistinct() {
+        #expect(AudioCue.allCases.count == 2)
+        #expect(AudioCue.allCases.contains(.micLive))
+        #expect(AudioCue.allCases.contains(.insertComplete))
+    }
+}

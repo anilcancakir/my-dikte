@@ -96,6 +96,14 @@ final class AudioCapture: @unchecked Sendable {
     /// VAD input.
     private static let rmsCapacity: Int = 32_768
 
+    /// What the level handler's readings are multiplied by before they leave this type. Matches
+    /// `references/pindrop/.../AudioRecorder.swift:326-372`: speech at a normal distance reads around
+    /// 0.02 RMS, which without gain is an invisible bar.
+    ///
+    /// Not private, because anything comparing a level reading against a raw RMS threshold has to
+    /// apply the same factor, and a second copy of the number is how the two would drift apart.
+    static let levelGain: Float = 15
+
     /// Nominal seconds of audio per converted buffer, used only to report how long a recording
     /// had grown when the preallocated level storage ran out.
     fileprivate static var tapChunkSeconds: Double {
@@ -301,9 +309,7 @@ final class AudioCapture: @unchecked Sendable {
 
             let rms: Float = TapState.rootMeanSquare(samples[0], frameCount: Int(converted.frameLength))
             state.appendRMS(Double(rms))
-            // Gain of 15 matches `references/pindrop/.../AudioRecorder.swift:326-372`: speech at
-            // a normal distance reads around 0.02 RMS, which without gain is an invisible bar.
-            handler?(min(1.0, rms * 15))
+            handler?(min(1.0, rms * AudioCapture.levelGain))
             // Last, and only while keeping, so a warm-up is never fed to the preview recogniser and
             // nothing here can delay the spool that holds the actual dictation.
             sink?(converted)

@@ -353,6 +353,9 @@ final class DictationPipeline {
     private var activeTrigger: RecordingTrigger = .latched
     /// What the shortcut layer was last told, so it hears a change and not every stage transition.
     private var isPublishedAsLatched = false
+    /// Set when a recording starts, cleared by the first buffer carrying sound. One "speak now" cue
+    /// per dictation, at the moment the microphone actually starts delivering audio.
+    private var isAwaitingMicLiveCue = false
     private var focusTarget: FocusTarget?
 
     init() {
@@ -362,7 +365,14 @@ final class DictationPipeline {
             // This runs on an AVFoundation render thread. Touching the main actor from there
             // directly is a SIGTRAP rather than a warning, so the hop is mandatory.
             Task { @MainActor in
-                self?.indicator.update(level: level)
+                guard let self else {
+                    return
+                }
+                self.indicator.update(level: level)
+                // The level handler is the only signal this type gets that audio is arriving, which
+                // makes it the right place to decide the microphone is live. Reusing it also means no
+                // new work on the audio thread: the hop above already exists.
+                self.playMicLiveCueIfPending(level: level)
             }
         }
         // Also on the render thread, and `accept` is written for it: it copies into a preallocated
@@ -506,10 +516,15 @@ final class DictationPipeline {
         }
 
         indicator.beginRun(stage: .recording)
-        AudioCue.play(.recordStart, enabled: configuration.audioCuesEnabled)
-        // After the capture is up and after the cue, so nothing about the preview can sit between
-        // the shortcut and the first recorded buffer. It reports why there is no preview to the log
-        // and returns; there is no failure path from here into the dictation.
+        // The cue itself is not played here. It waits for the first buffer that carries sound, which
+        // on the built-in microphone is 156 ms away and on AirPods about 1.5 s, and announcing a live
+        // microphone before one exists is what made the old cue misleading rather than merely quiet.
+        // The panel is the immediate acknowledgement that the shortcut registered; the sound is the
+        // one that means "speak now".
+        isAwaitingMicLiveCue = true
+        // After the capture is up, so nothing about the preview can sit between the shortcut and the
+        // first recorded buffer. It reports why there is no preview to the log and returns; there is
+        // no failure path from here into the dictation.
         livePreview.start(
             provider: configuration.livePreviewProvider,
             isEnabledInSettings: configuration.livePreviewEnabled,
@@ -519,6 +534,32 @@ final class DictationPipeline {
         // Last, and off this actor entirely: the recording is already running by the time the
         // handshake starts.
         prewarmChatConnection(mode: activeMode, configuration: configuration)
+    }
+
+    /// Plays the "speak now" cue the first time a buffer in this recording carries sound.
+    ///
+    /// The stage is checked as well as the flag, so a recording cancelled before any audio arrived
+    /// cannot leave the cue armed for the next warm-up, where it would fire with no recording running.
+    private func playMicLiveCueIfPending(level: Float) {
+        guard isAwaitingMicLiveCue, machine.stage == .recording else {
+            return
+        }
+        guard Self.isMicrophoneLive(level: level) else {
+            return
+        }
+        isAwaitingMicLiveCue = false
+        AudioCue.play(.micLive, enabled: configuration.audioCuesEnabled)
+    }
+
+    /// Whether a level reading means the microphone is delivering audio, rather than the exact zeros
+    /// a Bluetooth link reports for about 1.5 s before it opens.
+    ///
+    /// Derived from the two constants that already describe this boundary rather than picked: the
+    /// silence floor the leading-trim uses, carried through the gain the level handler applies. Room
+    /// tone measured around 0.0008 raw against a link-not-open 0.0, so this sits between them and
+    /// fires on breath rather than waiting for a word.
+    nonisolated static func isMicrophoneLive(level: Float) -> Bool {
+        level > Float(LeadingSilence.silenceRMS) * AudioCapture.levelGain
     }
 
     /// Opens the connection the cleanup or rewrite call will reuse, while the user is still speaking.
