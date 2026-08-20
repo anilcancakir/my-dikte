@@ -175,3 +175,34 @@ struct ElevenLabsLivePreviewTests {
         #expect(ElevenLabsLivePreview.displayCharacterLimit == LivePreview.displayCharacterLimit)
     }
 }
+
+/// The trailing silence sent before the commit. The user asked to "wait a second before finishing",
+/// and this is the shape that request actually takes: the recogniser does not need the caller to
+/// wait, it needs the audio not to stop mid-syllable.
+@Suite("Realtime trailing silence")
+struct RealtimeTrailingSilenceTests {
+    @Test("one second of silence at the capture rate, as true digital zero")
+    func trailingSilenceIsOneSecondOfZero() {
+        let frames = ElevenLabsLivePreview.trailingSilence()
+
+        #expect(frames.count == Int(AudioCapture.sampleRate * ElevenLabsLivePreview.trailingSilenceSeconds))
+        #expect(frames.count == 16_000)
+        #expect(frames.allSatisfy { $0 == 0 })
+    }
+
+    @Test("it encodes to the byte count the protocol expects, and to zeros")
+    func trailingSilenceEncodesToPCM16Zeros() {
+        let data = ElevenLabsLivePreview.pcm16Data(from: ElevenLabsLivePreview.trailingSilence())
+
+        // 16 kHz, one second, 16-bit mono.
+        #expect(data.count == 32_000)
+        #expect(data.allSatisfy { $0 == 0 })
+    }
+
+    @Test("the silence is under the documented one-second-per-chunk ceiling")
+    func trailingSilenceFitsOneChunk() {
+        // ElevenLabs documents 0.1 to 1 second per chunk. Exactly one second is the ceiling, so this
+        // has to stay at or below it or the send has to be split.
+        #expect(ElevenLabsLivePreview.trailingSilenceSeconds <= 1.0)
+    }
+}

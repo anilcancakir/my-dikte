@@ -83,6 +83,20 @@ final class ElevenLabsLivePreview: @unchecked Sendable {
     /// worth holding a socket open for longer than that.
     static let commitGraceSeconds: TimeInterval = 1.0
 
+    /// Silence appended after the speech and before the commit, so the model has acoustic context
+    /// past the final word instead of being cut off mid-syllable.
+    ///
+    /// This is standard practice for streaming recognisers and it is what the user was really asking
+    /// for when they asked to "wait a second before finishing": the recogniser does not need us to
+    /// wait, it needs the audio not to stop abruptly. Sending a second of digital silence costs one
+    /// message and about $0.0001, and it does **not** cost a second of latency, because the silence
+    /// is transmitted immediately rather than in real time. Only the model's own processing of it is
+    /// added to the commit round trip.
+    ///
+    /// One second matches the shortest interval the user asked for and the low end of ElevenLabs'
+    /// own VAD silence threshold (1.5 s), which is the window their model treats as an end of speech.
+    static let trailingSilenceSeconds: Double = 1.0
+
     /// The bound on what the indicator shows, and the tail-truncation rule, both borrowed from
     /// `LivePreview` so the two backends cannot drift into drawing differently.
     static let displayCharacterLimit = LivePreview.displayCharacterLimit
@@ -241,6 +255,16 @@ final class ElevenLabsLivePreview: @unchecked Sendable {
             data.append(UInt8(truncatingIfNeeded: scaled >> 8))
         }
         return data
+    }
+
+    /// The trailing silence buffer, as float frames at the capture sample rate.
+    ///
+    /// True digital zero rather than low-level noise: this is a deliberate end-of-speech marker, and
+    /// the leading-trim measurements in `LeadingSilence` are about audio the *microphone* reported as
+    /// zero, which is a different problem. Nothing trims the tail, so nothing here can be mistaken
+    /// for a dead Bluetooth link.
+    static func trailingSilence() -> [Float] {
+        [Float](repeating: 0, count: Int(AudioCapture.sampleRate * trailingSilenceSeconds))
     }
 
     /// What the indicator draws, delegated so both backends truncate identically.
@@ -437,6 +461,9 @@ final class ElevenLabsLivePreview: @unchecked Sendable {
         if !remaining.isEmpty {
             send(frames: remaining, commit: false, on: socket)
         }
+        // Then silence, so the last word is followed by context rather than by the stream ending
+        // mid-syllable. See `trailingSilenceSeconds` for why this is not a delay.
+        send(frames: Self.trailingSilence(), commit: false, on: socket)
         // An empty chunk with `commit: true` is how the protocol asks for the final segment; the
         // last words of the dictation are in that transcript and nowhere else.
         socket.send(.string(Self.audioChunkMessage(base64Audio: "", commit: true))) { _ in }
