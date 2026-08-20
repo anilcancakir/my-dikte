@@ -90,6 +90,19 @@ final class ElevenLabsLivePreview: @unchecked Sendable {
     /// Called with the text to show, on the main actor, in the order the partials arrived.
     var onPreviewText: (@MainActor @Sendable (String) -> Void)?
 
+    /// What `finishAndAwaitTranscript` came back with.
+    ///
+    /// Not a thrown error, because none of these is a dictation that has to fail: the caller can
+    /// still upload the audio to the batch endpoint, which is exactly what it does.
+    enum TranscriptOutcome: Sendable, Equatable {
+        case transcript(String)
+        /// The commit was sent and nothing came back inside the deadline.
+        case timedOut
+        /// No socket was open, so there was nothing to commit. The preview was off, unauthorised,
+        /// or the provider was not this one.
+        case notRunning
+    }
+
     private let logger = Logger(subsystem: BundleInfo.bundleIdentifier, category: "LivePreviewRealtime")
     private let lock = NSLock()
 
@@ -116,6 +129,9 @@ final class ElevenLabsLivePreview: @unchecked Sendable {
     private var socket: URLSessionWebSocketTask?
     private var pending: [Float] = []
     private var partialCount = 0
+    /// Resumed by the first committed transcript after a commit, or by the timeout, whichever lands
+    /// first. Cleared as it is resumed, because a continuation resumed twice is a crash.
+    private var transcriptWaiter: CheckedContinuation<TranscriptOutcome, Never>?
 
     init(
         readKey: @escaping @Sendable (String) -> KeychainStore.ReadResult = KeychainStore.read,
@@ -291,8 +307,53 @@ final class ElevenLabsLivePreview: @unchecked Sendable {
         // Teardown runs on the same serial queue as every send, so audio already in flight is sent
         // before the commit rather than after it, and the main actor never waits on the socket.
         sendQueue.async { [self] in
-            finishSocket()
+            flushAndCommit()
+            // Closing immediately would cancel the commit that was just sent, so the socket gets the
+            // measured round trip plus headroom and is then released whether or not the reply came.
+            sendQueue.asyncAfter(deadline: .now() + Self.commitGraceSeconds) { [self] in
+                closeSocket()
+            }
         }
+    }
+
+    /// Ends the audio and waits for the transcript of everything that was streamed, so the socket
+    /// that has been feeding the preview produces the authoritative text and no audio is uploaded a
+    /// second time.
+    ///
+    /// This is the mode ElevenLabs' own client examples use: they render `committedTranscripts` as
+    /// the result rather than following the stream with a batch request. It is offered as a choice
+    /// rather than as the default because the realtime model measured worse than the batch one on
+    /// this user's longer recordings; see this type's own documentation.
+    ///
+    /// Never throws and never fails a dictation. A deadline miss comes back as `.timedOut` and the
+    /// caller uploads the audio instead, which is slower but produces text.
+    func finishAndAwaitTranscript(timeout: Duration) async -> TranscriptOutcome {
+        guard isListening.exchange(false, ordering: .acquiringAndReleasing) else {
+            return .notRunning
+        }
+        // Deliberately no generation bump here, unlike `stop()`. The bump exists to stop a late
+        // message repainting a finished dictation, and in this mode the late message *is* the
+        // dictation.
+        let outcome: TranscriptOutcome = await withCheckedContinuation { continuation in
+            lock.lock()
+            transcriptWaiter = continuation
+            lock.unlock()
+
+            sendQueue.async { [self] in
+                flushAndCommit()
+            }
+
+            Task { [weak self] in
+                try? await Task.sleep(for: timeout)
+                self?.resumeWaiter(with: .timedOut)
+            }
+        }
+
+        if case .timedOut = outcome {
+            logger.error("the realtime transcript did not arrive before the deadline")
+        }
+        closeSocket()
+        return outcome
     }
 
     /// Called from the audio tap callback. No allocation, no lock, no network call.
@@ -354,13 +415,17 @@ final class ElevenLabsLivePreview: @unchecked Sendable {
         }
     }
 
-    /// Flushes what is left, asks for the committed transcript and closes. `sendQueue` only.
-    private func finishSocket() {
+    /// Sends whatever audio is left and then the commit, leaving the socket open for the reply.
+    /// `sendQueue` only.
+    ///
+    /// The socket is deliberately not cleared here, unlike in the first version of this file: both
+    /// callers still need the reply to arrive, one to draw a last preview and one because that reply
+    /// is the dictation. `closeSocket` is what releases it.
+    private func flushAndCommit() {
         lock.lock()
         let socket: URLSessionWebSocketTask? = self.socket
         let remaining: [Float] = pending
         let partialCount: Int = self.partialCount
-        self.socket = nil
         pending.removeAll(keepingCapacity: true)
         lock.unlock()
 
@@ -380,16 +445,29 @@ final class ElevenLabsLivePreview: @unchecked Sendable {
         let rejected: Int = ring.rejectedBuffers.load(ordering: .relaxed)
         logger.notice(
             """
-            live preview stopped: \(partialCount, privacy: .public) partial result(s), \
+            live preview committed: \(partialCount, privacy: .public) partial result(s), \
             \(dropped, privacy: .public) buffer(s) dropped, \
             \(rejected, privacy: .public) rejected
             """
         )
-        // Closing immediately would cancel the commit that was just sent, so the socket is given the
-        // measured round trip plus headroom and then closed whether or not the reply arrived.
-        sendQueue.asyncAfter(deadline: .now() + Self.commitGraceSeconds) {
-            socket.cancel(with: .normalClosure, reason: nil)
-        }
+    }
+
+    /// Releases the socket. Idempotent, and safe to call from either mode's teardown.
+    private func closeSocket() {
+        lock.lock()
+        let socket: URLSessionWebSocketTask? = self.socket
+        self.socket = nil
+        lock.unlock()
+        socket?.cancel(with: .normalClosure, reason: nil)
+    }
+
+    /// Hands `outcome` to whoever is waiting on the transcript, exactly once.
+    private func resumeWaiter(with outcome: TranscriptOutcome) {
+        lock.lock()
+        let waiter: CheckedContinuation<TranscriptOutcome, Never>? = transcriptWaiter
+        transcriptWaiter = nil
+        lock.unlock()
+        waiter?.resume(returning: outcome)
     }
 
     // MARK: - Results
@@ -401,11 +479,14 @@ final class ElevenLabsLivePreview: @unchecked Sendable {
             }
             switch result {
             case .failure(let error):
-                // Expected on every normal teardown: `stop` cancels the socket, and the pending
+                // Expected on every normal teardown: closing cancels the socket, and the pending
                 // receive fails with it. Only a failure while still listening is worth a line.
                 if self.isListening.load(ordering: .acquiring) {
                     self.logger.error("live preview socket failed: \(error.localizedDescription, privacy: .public)")
                 }
+                // A dead socket will never deliver the transcript, so a caller waiting on one is
+                // released now rather than left to sit out the whole deadline.
+                self.resumeWaiter(with: .timedOut)
             case .success(let message):
                 self.handle(message: message, generation: generation)
                 self.receive(on: socket, generation: generation)
@@ -422,7 +503,14 @@ final class ElevenLabsLivePreview: @unchecked Sendable {
         }
 
         switch event.messageType {
-        case "partial_transcript", "final_transcript", "committed_transcript":
+        case "committed_transcript":
+            // The segment the commit asked for. It feeds the panel when a preview is still on screen,
+            // and it is the dictation itself when `finishAndAwaitTranscript` is waiting for it.
+            if let text = event.text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+                resumeWaiter(with: .transcript(text))
+            }
+            publish(event.text, generation: generation)
+        case "partial_transcript", "final_transcript":
             publish(event.text, generation: generation)
         case "session_started":
             logger.notice("live preview session started")

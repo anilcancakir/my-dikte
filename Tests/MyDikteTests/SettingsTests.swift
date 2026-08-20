@@ -58,6 +58,7 @@ struct SettingsPersistenceTests {
             audioCuesEnabled: false,
             livePreviewEnabled: false,
             livePreviewProvider: .elevenLabs,
+            batchVerification: true,
             advisoryParaphraseGuard: false,
             stopOnReturnOrSpace: false
         )
@@ -69,7 +70,8 @@ struct SettingsPersistenceTests {
         #expect(decoded.retainAudio == false)
         #expect(decoded.audioCuesEnabled == false)
         #expect(decoded.livePreviewEnabled == false)
-        #expect(decoded.livePreviewProvider == .elevenLabs)
+        #expect(decoded.livePreviewProvider == Settings.LivePreviewProvider.elevenLabs)
+        #expect(decoded.batchVerification == true)
         #expect(decoded.advisoryParaphraseGuard == false)
         #expect(decoded.stopOnReturnOrSpace == false)
         #expect(decoded.promptToggleShortcut == settings.promptToggleShortcut)

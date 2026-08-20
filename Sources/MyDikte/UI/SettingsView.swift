@@ -455,6 +455,18 @@ private struct ModelsPane: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
+            // Only meaningful while a realtime socket exists: without one there is no transcript for
+            // the upload to be extra to, and the batch call happens either way.
+            if settings.livePreviewProvider == .elevenLabs, settings.livePreviewEnabled {
+                Toggle("Also upload for a second, more accurate reading", isOn: $settings.batchVerification)
+                    .onChange(of: settings.batchVerification) { _, _ in onChange() }
+
+                Text(batchVerificationSummary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             Divider()
 
             TextField(
@@ -505,6 +517,20 @@ private struct ModelsPane: View {
                 + "still comes from the batch call, which measured more accurate than the realtime "
                 + "model on longer recordings."
         }
+    }
+
+    /// The trade behind the extra upload, stated where the toggle is. Both directions are measured,
+    /// so neither is described as the safe one.
+    private var batchVerificationSummary: String {
+        if settings.batchVerification {
+            return "The realtime stream draws the live text and the audio is also uploaded to "
+                + "scribe_v2, whose answer is the one pasted. More accurate on longer recordings, "
+                + "about 700 ms slower, and it bills the same audio twice ($0.61 an audio hour)."
+        }
+        return "The realtime stream is the transcript, so one dictation costs one transcription "
+            + "($0.39 an audio hour) and the text lands about 210 ms after you stop. This is how "
+            + "ElevenLabs' own examples use it. Measured cost: the realtime model reads longer "
+            + "technical speech worse than the batch one, and has dropped glossary terms it was given."
     }
 
     /// What the requests will actually go to, built as a plain string rather than inline in the view:

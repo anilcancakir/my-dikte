@@ -138,6 +138,22 @@ struct Settings: Codable, Equatable {
     /// that decides whether a feature spends money and sends microphone audio off the machine, so it
     /// cannot live in code. Defaults to `.apple`, which is free and on device.
     var livePreviewProvider: LivePreviewProvider
+    /// Whether the batch endpoint is called even when the ElevenLabs realtime socket has already
+    /// produced a transcript of the same audio.
+    ///
+    /// Off by default, which makes the realtime stream the authoritative text and one dictation cost
+    /// one transcription rather than two. That is also the shape ElevenLabs' own client examples use:
+    /// they render the committed transcript as the result and never follow it with an upload.
+    ///
+    /// Turning it on buys accuracy with money and latency. Measured on nine of this user's recordings,
+    /// batch `scribe_v2` reads longer Turkish technical speech better than `scribe_v2_realtime`, which
+    /// dropped "Kubernetes" and turned "PyQt" into "File create" on a clip where both were in the
+    /// keyterms list. So this is a real trade and not a safety net, which is why it is a setting and
+    /// not a constant.
+    ///
+    /// Only meaningful while the ElevenLabs preview is running: with no realtime socket there is no
+    /// transcript to skip the upload for, and the batch call happens regardless.
+    var batchVerification: Bool
     /// Whether a paraphrase concern lets the cleanup through (advisory) or discards it in favour of
     /// the raw transcript (strict). Advisory unless it is turned off, on the strength of a
     /// measurement rather than a preference: over one day of real use the guard rejected three
@@ -168,14 +184,16 @@ struct Settings: Codable, Equatable {
         audioCuesEnabled: true,
         livePreviewEnabled: true,
         livePreviewProvider: .apple,
+        batchVerification: false,
         advisoryParaphraseGuard: true,
         stopOnReturnOrSpace: true
     )
 }
 
 extension Settings {
-    /// Decodes every field strictly except `advisoryParaphraseGuard`, `stopOnReturnOrSpace` and
-    /// `livePreviewProvider`, which fall back to their defaults when the file does not carry them.
+    /// Decodes every field strictly except `advisoryParaphraseGuard`, `stopOnReturnOrSpace`,
+    /// `livePreviewProvider` and `batchVerification`, which fall back to their defaults when the file
+    /// does not carry them.
     ///
     /// The general rule for this file stands: a file that will not decode is replaced by defaults,
     /// because a background app must not die on a corrupt settings file. These two keys are exempt
@@ -206,6 +224,8 @@ extension Settings {
         livePreviewEnabled = try container.decode(Bool.self, forKey: .livePreviewEnabled)
         livePreviewProvider = try container.decodeIfPresent(LivePreviewProvider.self, forKey: .livePreviewProvider)
             ?? Settings.default.livePreviewProvider
+        batchVerification = try container.decodeIfPresent(Bool.self, forKey: .batchVerification)
+            ?? Settings.default.batchVerification
         advisoryParaphraseGuard = try container.decodeIfPresent(Bool.self, forKey: .advisoryParaphraseGuard)
             ?? Settings.default.advisoryParaphraseGuard
         stopOnReturnOrSpace = try container.decodeIfPresent(Bool.self, forKey: .stopOnReturnOrSpace)

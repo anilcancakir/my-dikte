@@ -660,3 +660,81 @@ struct MicrophoneLiveCueTests {
         #expect(AudioCue.allCases.contains(.insertComplete))
     }
 }
+
+/// Where a dictation's text comes from. The realtime socket is already streaming the same audio, so
+/// uploading it again is a choice about accuracy against cost, and all three conditions below have
+/// to hold before the upload can be skipped.
+@Suite("Realtime transcript source")
+struct RealtimeTranscriptSourceTests {
+    private func configuration(
+        previewEnabled: Bool,
+        previewProvider: Settings.LivePreviewProvider,
+        batchVerification: Bool
+    ) -> PipelineConfiguration {
+        var settings = Settings.default
+        settings.livePreviewEnabled = previewEnabled
+        settings.livePreviewProvider = previewProvider
+        settings.batchVerification = batchVerification
+        return PipelineConfiguration(settings: settings)
+    }
+
+    @Test("the realtime stream is the transcript when the ElevenLabs preview runs and verification is off")
+    func realtimeIsAuthoritativeByDefault() {
+        let configuration = configuration(
+            previewEnabled: true,
+            previewProvider: .elevenLabs,
+            batchVerification: false
+        )
+        #expect(configuration.usesRealtimeTranscript == true)
+    }
+
+    @Test("asking for verification puts the batch upload back")
+    func verificationRestoresTheUpload() {
+        let configuration = configuration(
+            previewEnabled: true,
+            previewProvider: .elevenLabs,
+            batchVerification: true
+        )
+        #expect(configuration.usesRealtimeTranscript == false)
+    }
+
+    @Test("no socket means no realtime transcript, whichever way it is missing")
+    func withoutASocketTheUploadIsTheOnlySource() {
+        // Apple's recogniser runs on device so its output can be thrown away; it has never been
+        // allowed near the caret and this is where that stays true.
+        #expect(
+            configuration(previewEnabled: true, previewProvider: .apple, batchVerification: false)
+                .usesRealtimeTranscript == false
+        )
+        #expect(
+            configuration(previewEnabled: false, previewProvider: .elevenLabs, batchVerification: false)
+                .usesRealtimeTranscript == false
+        )
+    }
+
+    @Test("the default settings upload, because the preview defaults to on device")
+    func defaultsUpload() {
+        #expect(PipelineConfiguration(settings: .default).usesRealtimeTranscript == false)
+        #expect(Settings.default.batchVerification == false)
+    }
+
+    @Test("the realtime deadline is generous against the measured commit round trip")
+    func theDeadlineIsGenerous() {
+        // 192 to 313 ms measured across five recordings; three seconds is an order of magnitude out,
+        // which is deliberate because missing it costs a whole batch call on top of the wait.
+        #expect(PipelineConfiguration.realtimeTranscriptTimeout == .seconds(3))
+    }
+
+    @Test("a timed-out or absent socket is an outcome, not a thrown error")
+    func outcomesAreValues() {
+        // Nothing here may fail a dictation: each of these has to leave the upload reachable.
+        let outcomes: [ElevenLabsLivePreview.TranscriptOutcome] = [
+            .transcript("merhaba"),
+            .timedOut,
+            .notRunning,
+        ]
+        #expect(outcomes.count == 3)
+        #expect(outcomes.contains(.timedOut))
+        #expect(ElevenLabsLivePreview.TranscriptOutcome.transcript("a") != .transcript("b"))
+    }
+}

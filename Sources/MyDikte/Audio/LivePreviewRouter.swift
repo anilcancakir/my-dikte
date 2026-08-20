@@ -53,6 +53,17 @@ final class LivePreviewRouter: @unchecked Sendable {
         elevenLabs.stop()
     }
 
+    /// Ends the ElevenLabs stream and waits for the transcript of everything it was sent, so the
+    /// socket that fed the preview produces the dictation and the audio is not uploaded again.
+    ///
+    /// Only the ElevenLabs backend can answer this; Apple's recogniser runs on device precisely so
+    /// that its output can be thrown away, and its text has never been allowed near the caret. Apple
+    /// is stopped here too, so one call ends the preview whichever backend was running.
+    func finishAndAwaitRealtimeTranscript(timeout: Duration) async -> ElevenLabsLivePreview.TranscriptOutcome {
+        apple.stop()
+        return await elevenLabs.finishAndAwaitTranscript(timeout: timeout)
+    }
+
     /// Called from the `AVAudioEngine` tap callback. Both calls are an atomic load and a return when
     /// that backend is idle.
     func accept(_ buffer: AVAudioPCMBuffer) {

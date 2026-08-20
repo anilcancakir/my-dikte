@@ -60,6 +60,7 @@ struct PipelineConfiguration: Sendable, Equatable {
     let audioCuesEnabled: Bool
     let livePreviewEnabled: Bool
     let livePreviewProvider: Settings.LivePreviewProvider
+    let batchVerification: Bool
     let advisoryParaphraseGuard: Bool
 
     private let cleanupEndpoint: String
@@ -79,10 +80,27 @@ struct PipelineConfiguration: Sendable, Equatable {
         audioCuesEnabled = settings.audioCuesEnabled
         livePreviewEnabled = settings.livePreviewEnabled
         livePreviewProvider = settings.livePreviewProvider
+        batchVerification = settings.batchVerification
         advisoryParaphraseGuard = settings.advisoryParaphraseGuard
         cleanupEndpoint = Self.resolvedEndpoint(settings.cleanupEndpoint)
         rewriteEndpoint = Self.resolvedEndpoint(settings.rewriteEndpoint)
     }
+
+    /// Whether this dictation's text comes from the realtime socket that was already streaming it,
+    /// rather than from a second upload to the batch endpoint.
+    ///
+    /// All three conditions are required, and each for its own reason: the preview has to be on and
+    /// on the ElevenLabs backend for a socket to exist at all, and `batchVerification` is the user
+    /// deciding they would rather pay twice for the more accurate reading.
+    var usesRealtimeTranscript: Bool {
+        livePreviewEnabled && livePreviewProvider == .elevenLabs && !batchVerification
+    }
+
+    /// How long the realtime transcript is waited for before falling back to an upload. The commit
+    /// round trip measured 192 to 313 ms across five recordings, so this is roughly ten times the
+    /// slowest observed case: generous, because the fallback costs a whole batch call on top of the
+    /// wait and a deadline this far out will only be hit by something actually broken.
+    static let realtimeTranscriptTimeout: Duration = .seconds(3)
 
     /// What a paraphrase concern does to this dictation. Resolved here, with every other per-run
     /// decision, so a settings change takes effect on the next dictation and never mid-flight.
@@ -639,15 +657,32 @@ final class DictationPipeline {
 
         do {
             // 1. Finish the capture and take the per-chunk level series with it.
+            //
+            //    In realtime mode the preview is not merely stopped, it is committed and its answer
+            //    kept: the socket has been streaming this same audio all along, so its transcript is
+            //    the dictation and no upload is needed. The wait runs as a task started here rather
+            //    than awaited here, so the transcript travels while the audio is being encoded.
+            let realtimeTranscript: Task<ElevenLabsLivePreview.TranscriptOutcome, Never>?
             let recording: AudioCapture.Recording
             if let preCaptured {
                 recording = preCaptured
+                realtimeTranscript = nil
             } else {
                 // Before the capture stops, so the preview stops hearing at the same instant the
                 // recording does, and before the clock starts, so an atomic exchange and one async
-                // dispatch cannot land in `captureMs`. The teardown runs on the preview's own queue
-                // and nothing here waits for it.
-                livePreview.stop()
+                // dispatch cannot land in `captureMs`.
+                if configuration.usesRealtimeTranscript {
+                    let preview = livePreview
+                    realtimeTranscript = Task {
+                        await preview.finishAndAwaitRealtimeTranscript(
+                            timeout: PipelineConfiguration.realtimeTranscriptTimeout
+                        )
+                    }
+                } else {
+                    // The teardown runs on the preview's own queue and nothing here waits for it.
+                    livePreview.stop()
+                    realtimeTranscript = nil
+                }
                 let started = ContinuousClock.now
                 recording = try capture.stop()
                 timings.record(.capture, seconds: Self.elapsed(since: started))
@@ -727,16 +762,30 @@ final class DictationPipeline {
             temporaryFiles.removeAll { $0 == pcmURL }
             try Task.checkCancellation()
 
-            // 4. Transcribe.
+            // 4. Transcribe, from whichever source this run is configured for.
             advance(to: .transcribing)
             let transcribeStarted = ContinuousClock.now
-            let transcription = try await client(for: configuration).transcribe(
-                audioData: audioData,
-                glossaryTerms: configuration.glossaryTerms
-            )
+            let raw: String
+            let realtimeOutcome: ElevenLabsLivePreview.TranscriptOutcome? = await realtimeTranscript?.value
+            if case .transcript(let text) = realtimeOutcome {
+                raw = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                logger.notice("realtime transcript, \(raw.count, privacy: .public) characters, no upload")
+            } else {
+                // Either this run never had a socket, or the socket did not answer. Uploading is the
+                // slower path but it is the one that produces text, and the reason is already logged
+                // by whichever side gave up.
+                if let realtimeOutcome {
+                    let cause = String(describing: realtimeOutcome)
+                    logger.notice("realtime transcript unavailable (\(cause, privacy: .public)), uploading instead")
+                }
+                let transcription = try await client(for: configuration).transcribe(
+                    audioData: audioData,
+                    glossaryTerms: configuration.glossaryTerms
+                )
+                raw = transcription.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                logger.notice("transcribed \(raw.count, privacy: .public) characters")
+            }
             timings.record(.transcribe, seconds: Self.elapsed(since: transcribeStarted))
-            let raw = transcription.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            logger.notice("transcribed \(raw.count, privacy: .public) characters")
 
             // 5. A stock phrase invented for a near-silent clip never reaches the caret.
             // Voiced seconds, not wall-clock duration. The filter's premise is about how much real
