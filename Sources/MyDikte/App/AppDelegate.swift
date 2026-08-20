@@ -194,7 +194,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // recording is in flight, which is what makes a key arriving just after one ended harmless
             // rather than the start of a dictation nobody asked for.
             pipeline.stopRequested()
-        case .cancelRequested:
+        case .cancelRequested, .cancelKeyRequested:
+            // Same destination by either route, the keyed shortcut or a bare Escape. The coordinator
+            // keeps them as separate events so the log can say which one fired; the pipeline does not
+            // need to care, because a discarded dictation is discarded the same way.
             pipeline.cancelRequested()
         case .promptToggleRequested:
             // Mode 2: the same dictation, rewritten into an English prompt for Opus 5 and inserted

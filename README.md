@@ -96,16 +96,22 @@ case you might.
 | Mode 2 toggle | `Option+Shift+Y` | Produces an English prompt |
 | Cancel | `Control+Option+Command+C` | Deliberately awkward; discards the recording |
 | Stop | `Return` or `Space` | Only while a toggled recording is running |
+| Cancel | `Escape` | Same window; discards the recording |
 
 All four are configurable. The defaults avoid `Control+Option`, which the window manager Magnet uses
 for its thirds and centring, and avoid `Command+Shift+T`, which is "reopen the last closed tab" in
 every browser. `Option+Shift` is bound by almost nothing, so the only thing a global one costs is the
 character it types: `ˇ`, `Á` and `∏` on a US layout, measured with `UCKeyTranslate`.
 
-`Return` and `Space` are watched only while a recording is in flight and swallowed when they fire, so
-they never reach the focused application. With a password field focused they do not work at all,
-because a `CGEventTap` loses key-down under secure input while `flagsChanged` keeps flowing; the keyed
-shortcut still stops the recording there.
+`Return`, `Space` and `Escape` are watched only while a recording is in flight and swallowed when they
+fire, so they never reach the focused application. With a password field focused they do not work at
+all, because a `CGEventTap` loses key-down under secure input while `flagsChanged` keeps flowing; the
+keyed shortcuts still stop and cancel the recording there.
+
+`Escape` is the natural key for cancelling and it is available here for a specific reason: it is not
+registered as a global hot key, which would take the key away from every application for the whole
+session. The tap claims it only inside a window the user opened deliberately and that lasts seconds.
+The keyed cancel stays because it is the one that works under secure input.
 
 ## How it works
 

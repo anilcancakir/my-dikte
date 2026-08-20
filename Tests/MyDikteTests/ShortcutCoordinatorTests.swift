@@ -373,3 +373,85 @@ struct StopKeyMachineTests {
         #expect(machine.handle(kind: .keyDown, keyCode: Self.returnKey, flags: Self.bare) == .stopRecording)
     }
 }
+
+/// Escape cancels a latched recording. It rides the same tap, the same latch and the same
+/// swallow rules as the stop keys, and differs only in what it asks the pipeline to do.
+@Suite("Cancel key")
+struct CancelKeyMachineTests {
+    private typealias Machine = ShortcutCoordinator.StopKeyMachine
+
+    private static let escapeKey = Int64(kVK_Escape)
+    private static let returnKey = Int64(kVK_Return)
+    private static let bare = CGEventFlags(rawValue: 0x0000_0100)
+
+    private static func latched(isEnabled: Bool = true) -> Machine {
+        var machine = Machine(isEnabled: isEnabled)
+        machine.setLatchedRecording(true)
+        return machine
+    }
+
+    @Test("Escape cancels a latched recording rather than ending it")
+    func escapeCancels() {
+        var machine = Self.latched()
+
+        #expect(machine.handle(kind: .keyDown, keyCode: Self.escapeKey, flags: Self.bare) == .cancelRecording)
+    }
+
+    @Test("with no recording in flight Escape is passed through, so no application loses the key")
+    func idleLeavesEscapeAlone() {
+        var machine = Machine(isEnabled: true)
+
+        #expect(machine.handle(kind: .keyDown, keyCode: Self.escapeKey, flags: Self.bare) == .pass)
+        #expect(machine.handle(kind: .keyUp, keyCode: Self.escapeKey, flags: Self.bare) == .pass)
+    }
+
+    @Test("the Escape key-up is swallowed too, so no application sees half a press")
+    func escapeKeyUpIsSwallowed() {
+        var machine = Self.latched()
+
+        #expect(machine.handle(kind: .keyDown, keyCode: Self.escapeKey, flags: Self.bare) == .cancelRecording)
+        machine.setLatchedRecording(false)
+        #expect(machine.handle(kind: .keyUp, keyCode: Self.escapeKey, flags: Self.bare) == .swallow)
+    }
+
+    @Test("auto-repeat of a held Escape cancels once and is swallowed after")
+    func heldEscapeCancelsOnce() {
+        var machine = Self.latched()
+
+        #expect(machine.handle(kind: .keyDown, keyCode: Self.escapeKey, flags: Self.bare) == .cancelRecording)
+        #expect(machine.handle(kind: .keyDown, keyCode: Self.escapeKey, flags: Self.bare) == .swallow)
+        #expect(machine.handle(kind: .keyDown, keyCode: Self.escapeKey, flags: Self.bare) == .swallow)
+    }
+
+    @Test("a modified Escape belongs to the focused application")
+    func modifiedEscapeIsPassedOn() {
+        var machine = Self.latched()
+        let withCommand = CGEventFlags(rawValue: Self.bare.rawValue | CGEventFlags.maskCommand.rawValue)
+
+        #expect(machine.handle(kind: .keyDown, keyCode: Self.escapeKey, flags: withCommand) == .pass)
+    }
+
+    @Test("turning the gesture off gives Escape back, as it does the stop keys")
+    func disabledPassesEscape() {
+        var machine = Self.latched(isEnabled: false)
+
+        #expect(machine.handle(kind: .keyDown, keyCode: Self.escapeKey, flags: Self.bare) == .pass)
+    }
+
+    @Test("the three handled keys are exactly Return, Space and Escape")
+    func theHandledKeysAreTheThreeExpected() {
+        #expect(Machine.handledKeyCodes == [Self.returnKey, Int64(kVK_Space), Self.escapeKey])
+        #expect(Machine.cancelKeyCode == Self.escapeKey)
+        #expect(Machine.stopKeyCodes.contains(Self.escapeKey) == false)
+    }
+
+    @Test("Escape and the stop keys stay independent within one recording")
+    func escapeAndStopKeysDoNotInterfere() {
+        var machine = Self.latched()
+
+        // Escape is pressed and swallowed; a Return arriving afterwards is still a fresh stop, because
+        // the swallow bookkeeping is per key code.
+        #expect(machine.handle(kind: .keyDown, keyCode: Self.escapeKey, flags: Self.bare) == .cancelRecording)
+        #expect(machine.handle(kind: .keyDown, keyCode: Self.returnKey, flags: Self.bare) == .stopRecording)
+    }
+}

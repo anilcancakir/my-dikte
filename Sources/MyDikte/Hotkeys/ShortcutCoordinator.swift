@@ -160,6 +160,12 @@ final class ShortcutCoordinator: @unchecked Sendable {
         /// dictation when none is running, and a stop key that arrived a moment after the recording
         /// ended must do nothing at all rather than start a new one.
         case stopKeyRequested
+        /// A bare Escape was pressed while a latched recording was in flight, and was swallowed rather
+        /// than passed on. Kept separate from `cancelRequested` so the log says which of the two
+        /// mechanisms threw a dictation away: the keyed shortcut is deliberately awkward to press,
+        /// this one is a single key, and telling them apart matters if cancels start happening by
+        /// accident.
+        case cancelKeyRequested
         /// The keyed Mode 2 shortcut fired: start or stop a dictation that is rewritten into an
         /// English prompt rather than cleaned up. Added after Step 17 shipped, because the pipeline
         /// supported Mode 2 from the start (`toggleRequested(mode:)`) while nothing could trigger
@@ -396,6 +402,9 @@ final class ShortcutCoordinator: @unchecked Sendable {
         case .stopRecording:
             emit([.stopKeyRequested])
             return .swallow
+        case .cancelRecording:
+            emit([.cancelKeyRequested])
+            return .swallow
         }
     }
 
@@ -483,6 +492,7 @@ extension ShortcutCoordinator.Event {
         case .cancelRequested: return "cancelRequested"
         case .promptToggleRequested: return "promptToggleRequested"
         case .stopKeyRequested: return "stopKeyRequested"
+        case .cancelKeyRequested: return "cancelKeyRequested"
         }
     }
 }
@@ -686,6 +696,10 @@ extension ShortcutCoordinator {
             /// Ours, and it ends the recording. Swallowed as well as acted on: a dictation landing in
             /// a text field must not also gain the newline or the space that stopped it.
             case stopRecording
+            /// Ours, and it throws the recording away. Swallowed for the same reason, and because an
+            /// Escape that both cancelled the dictation and dismissed the focused application's sheet
+            /// would be one key press doing two things the user only asked once for.
+            case cancelRecording
             /// Ours, but not a fresh stop: the key-up of a key-down already swallowed, or its
             /// auto-repeat. Swallowed too, because handing an application half a key press it never
             /// saw begin is the same stray input this gesture exists to avoid.
@@ -696,6 +710,20 @@ extension ShortcutCoordinator {
         /// already on the keyboard reaches without looking, which is the whole reason the gesture
         /// exists, and a third one would only be a key taken away from a recording's own seconds.
         static let stopKeyCodes: Set<Int64> = [Int64(kVK_Return), Int64(kVK_Space)]
+
+        /// Escape (53), which throws the recording away rather than ending it.
+        ///
+        /// `Configuration.defaultCancel` explains why Escape is **not** registered as a global hot
+        /// key: doing that would take the key away from every application for the whole session. This
+        /// is the other mechanism and it does not have that problem. The tap only claims Escape while
+        /// a latched recording is in flight, which is a window the user opened deliberately and
+        /// measured in seconds, and passes it straight through at every other moment. So the natural
+        /// key for cancelling is available here precisely because it is not claimed globally.
+        static let cancelKeyCode = Int64(kVK_Escape)
+
+        /// Every key this machine looks at. A key outside this set returns `.pass` before anything
+        /// else is considered, which is the property that keeps the tap invisible.
+        static let handledKeyCodes: Set<Int64> = stopKeyCodes.union([cancelKeyCode])
 
         /// A press carrying any of these belongs to the focused application: Command-Return sends in
         /// half the apps on this machine, and Option-Space and Shift-Space type characters. Caps Lock,
@@ -728,7 +756,7 @@ extension ShortcutCoordinator {
             keyCode: Int64,
             flags: CGEventFlags
         ) -> Decision {
-            guard isEnabled, Self.stopKeyCodes.contains(keyCode) else {
+            guard isEnabled, Self.handledKeyCodes.contains(keyCode) else {
                 return .pass
             }
 
@@ -743,7 +771,7 @@ extension ShortcutCoordinator {
                     return .pass
                 }
                 swallowedKeyCodes.insert(keyCode)
-                return .stopRecording
+                return keyCode == Self.cancelKeyCode ? .cancelRecording : .stopRecording
 
             case .keyUp:
                 return swallowedKeyCodes.remove(keyCode) == nil ? .pass : .swallow

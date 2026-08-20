@@ -680,7 +680,7 @@ private struct BehaviourPane: View {
             Toggle("Insert the cleanup even when the guard has a concern", isOn: $settings.advisoryParaphraseGuard)
                 .onChange(of: settings.advisoryParaphraseGuard) { _, _ in onChange() }
 
-            Toggle("End a recording with Return or Space", isOn: $settings.stopOnReturnOrSpace)
+            Toggle("End with Return or Space, cancel with Escape", isOn: $settings.stopOnReturnOrSpace)
                 .onChange(of: settings.stopOnReturnOrSpace) { _, _ in onChange() }
 
             Text("Return and Space are watched only while a recording started by a shortcut is running, "

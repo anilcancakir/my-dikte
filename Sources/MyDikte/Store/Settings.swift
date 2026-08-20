@@ -160,11 +160,18 @@ struct Settings: Codable, Equatable {
     /// correct cleanups and caught no genuine paraphrase. Strict stays reachable, because the
     /// measurement can change and this is not a one-way door.
     var advisoryParaphraseGuard: Bool
-    /// Whether a bare Return or Space ends a recording that a keyed shortcut started. On unless it is
-    /// turned off: reaching back for a two-modifier chord to stop is the awkwardness it removes, and the
-    /// two keys are watched only while a recording is in flight, so what leaving it on costs is bounded
-    /// by the length of a dictation. `Hotkeys/ShortcutCoordinator.swift` owns the gesture and the
-    /// limitation that comes with it (secure input hides the keys from the tap).
+    /// Whether bare keys can end or cancel a recording that a keyed shortcut started: Return and
+    /// Space end it, Escape throws it away.
+    ///
+    /// On unless it is turned off: reaching back for a two-modifier chord to stop is the awkwardness it
+    /// removes, and the keys are watched only while a recording is in flight, so what leaving it on
+    /// costs is bounded by the length of a dictation. `Hotkeys/ShortcutCoordinator.swift` owns the
+    /// gesture and the limitation that comes with it (secure input hides the keys from the tap).
+    ///
+    /// The name says Return or Space because those were the two keys it shipped with. Escape joined
+    /// the same gesture rather than gaining a setting of its own: it is the same tap, the same latch
+    /// and the same secure-input limitation, and a user who does not want bare keys acting on a
+    /// recording does not want one of the three either.
     var stopOnReturnOrSpace: Bool
 
     static let `default` = Settings(
