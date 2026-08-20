@@ -149,10 +149,47 @@ logged and no threshold is enforced. See `TranscriptionResponse.wordConfidence`.
 | 50 dictations a day | $0.95 / month | $1.17 / month | $2.86 / month |
 | 100 dictations a day | $1.91 / month | $2.34 / month | $5.73 / month |
 
-**Not verified: the minimum billing unit.** The docs say "billed per audio minute" and never say
-whether a 10 s request is billed as 10 s or rounded up. If it rounds to a whole minute, every figure
-above multiplies by about six. Reading the Developers dashboard analytics after a day of real use
-would settle it.
+### Billing settled, from the account's own analytics
+
+`POST /v1/workspace/analytics/query/usage-by-product-over-time` returns `total_usage` (credits),
+`total_minutes`, `total_cost` (usd) and `usage_count` per one-minute bucket, capped at 1000 buckets
+per query so a 24-hour window is rejected and an 8-hour one is not. One day of this project's own
+traffic, probes included:
+
+```
+87 requests    16.10 min audio    778 credits    $0.0785
+```
+
+**The minimum billing unit is the second, not the minute.** 87 requests averaging 11.1 s billed as
+16.10 minutes. Rounding each request up to a whole minute would have read 87 minutes; the ratio is
+0.185. So the earlier worry that every cost figure here might multiply by six is closed: it does not.
+
+**Credits per minute of speech to text is about 48, not the 330 the pricing page implies.** 778
+credits for 16.10 minutes. That 330 figure describes the credit-metered Creative products, and
+reading it as the API's STT rate understates the free tier by a factor of seven: 10,000 credits buys
+roughly **207 minutes** of audio, not 30.
+
+Blended cost came out at **$0.293 per hour**, which sits where it should between batch at $0.22 and
+realtime at $0.39, since this day used both on the same audio.
+
+### What the free tier actually covers
+
+At this user's median 9.9 s dictation, with the realtime preview on (which bills the same audio a
+second time):
+
+| Dictations a day | Batch + preview | Batch only |
+|---|---|---|
+| 10 | 4,784 credits | 2,392 credits |
+| 20 | 9,568 credits | 4,784 credits |
+| 50 | 23,920 credits | 11,960 credits |
+| 100 | 47,840 credits | 23,920 credits |
+
+So the free 10,000 credits a month cover about **20 dictations a day with the preview on**, or 40
+with it off. Beyond that the account needs credits bought.
+
+`GET /v1/user/subscription` on this account reports `tier: free`, `max_credit_limit_extension: 0` and
+`can_extend_character_limit: false`, which together mean usage-based billing is off: running out
+stops the transcription rather than producing a bill.
 
 Every plan's "hours included" is just the plan price divided by the hourly rate (27 x 0.22 = 5.94 for
 the $6 Starter, 100 x 0.22 = 22 for the $22 Creator, 450 x 0.22 = 99 for the $99 Pro), so a plan buys

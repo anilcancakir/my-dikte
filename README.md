@@ -166,6 +166,11 @@ All from this machine, all reproducible from the log and the evidence files.
 - **ElevenLabs costs about $1 to $2 a month at this usage.** $0.22 per audio hour for batch, $0.39 for
   realtime, $0.05 on top for keyterms, against a measured median dictation of 9.9 s. Buying a plan
   gives no discount: every plan's included hours are just its price divided by the same hourly rate.
+- **Billing is per second, and the free tier is larger than the pricing page implies.** Read back from
+  the account's own analytics endpoint: 87 requests averaging 11.1 s billed as 16.10 minutes, so
+  nothing rounds up to a whole minute. Speech to text costs about 48 credits a minute rather than the
+  330 the credit table lists for the Creative products, which makes the free 10,000 credits worth
+  roughly 207 minutes of audio: about 20 dictations a day with the realtime preview on, 40 with it off.
 
 ## Known limitations
 
@@ -181,12 +186,13 @@ All from this machine, all reproducible from the log and the evidence files.
   the true division". Read its output before you send it.
 - **Turkish only**, in the sense that the prompts and the glossary rule are written in Turkish. The
   transcription request pins `language=tr`.
-- **ElevenLabs' minimum billing unit is unverified.** The docs say "billed per audio minute" without
-  saying whether a 10 s request is billed as 10 s or rounded up to a minute. If it rounds, the monthly
-  figures above multiply by about six.
 - **The glossary is sent twice with different limits.** Batch Scribe takes 100 keyterms of up to 50
   characters; the realtime endpoint takes 50 of up to 20. A long term reaches the batch call and is
   dropped from the preview, silently and by design.
+- **Adding a glossary term is not free, measured twice.** Seven terms transcribed "Groq" correctly and
+  eight did not, turning it into "Grok"; separately, adding "Opus 5" fixed that name and broke "Groq"
+  into "Graf" in the same request. Both models read the field as speech preceding the audio, so an
+  unrelated term crowds out a relevant one. Keep the list at what you actually say out loud.
 
 ## Author
 
