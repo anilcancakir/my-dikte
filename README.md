@@ -33,6 +33,8 @@ request shape and the shortcut recorder.
   tested on Intel either.
 - A [Groq](https://console.groq.com) API key. The free tier is enough for personal use; see the limits
   below.
+- Optionally an [ElevenLabs](https://elevenlabs.io) API key. Scribe v2 reads Turkish technical speech
+  measurably better than Whisper and is not free; the comparison and the bill are both below.
 
 ## Build and install
 
@@ -66,9 +68,15 @@ Open Settings from the menu-bar icon.
 **Keys.** Paste your Groq key. It goes to the login Keychain under service `com.anilcan.mydikte`,
 never to a file. Nothing in this repository reads or writes a key anywhere else.
 
-**Models.** Empty fields mean the built-in default, shown in grey. Transcription defaults to Groq
-`whisper-large-v3`. Cleanup defaults to `openai/gpt-oss-120b` on Groq, though `google/gemini-3.5-flash-lite`
-through OpenRouter measured better on all three axes (see below).
+**Models.** Empty fields mean the built-in default, shown in grey, and the default follows the
+provider: `whisper-large-v3` on Groq, `scribe_v2` on ElevenLabs. Cleanup defaults to
+`openai/gpt-oss-120b` on Groq, though `google/gemini-3.5-flash-lite` through OpenRouter measured
+better on all three axes (see below).
+
+**Live preview source.** Apple's on-device `SFSpeechRecognizer` (free, offline, nothing leaves the
+machine) or ElevenLabs Scribe v2 realtime ($0.39 per audio hour, needs a connection, reads Turkish
+better). Apple is the default, because a preview must never be the reason a dictation costs money.
+Either way the text that reaches the caret comes from the batch call, not the preview.
 
 **Glossary.** Terms you say often: product names, libraries, commands. It goes to the transcription
 request as a decoding hint and to the cleanup model as a spelling reference.
@@ -104,12 +112,19 @@ shortcut still stops the recording there.
 Two hosted services and one on-device model:
 
 - **Groq** `/audio/transcriptions` with `whisper-large-v3`: speech to Turkish text, 400 to 650 ms.
+  Selectable for OpenAI, OpenRouter or **ElevenLabs Scribe v2** instead; ElevenLabs is the accurate
+  one and the slow one, roughly 1.3 s.
 - **Groq** `/chat/completions`: the same model does two jobs depending on mode, cleanup or prompt
   rewrite. Swappable for any OpenAI-compatible endpoint.
-- **Apple `SFSpeechRecognizer`**, on device, `tr-TR`: the live preview only. It never leaves the
-  machine and its output is thrown away, because the authoritative text comes from the hosted path.
-  Groq has no streaming transcription endpoint, so a live preview cannot come from the same provider
-  that produces the final text.
+- **Apple `SFSpeechRecognizer`**, on device, `tr-TR`: the live preview. It never leaves the machine
+  and its output is thrown away, because the authoritative text comes from the batch path. Neither
+  Groq nor Whisper has a streaming endpoint, so a preview cannot come from the same call that
+  produces the final text.
+- **ElevenLabs Scribe v2 realtime** over a WebSocket: the live preview, optionally, instead of Apple.
+  Words appear about 2.4 s into the recording and are rewritten in place as the model changes its
+  mind, and the last segment lands roughly 210 ms after the shortcut is released. Its text is still
+  thrown away: measured on nine recordings the realtime model is worse than the batch model at the
+  thing that matters here, so the preview is early and the paste is right.
 
 Between them, several checks that cost nothing and run locally: leading digital silence is trimmed
 before upload, voice activity detection stops a silent recording before any request is made, a
@@ -138,6 +153,19 @@ All from this machine, all reproducible from the log and the evidence files.
   prompt plus up to 717 completion tokens with `gpt-oss-120b`. That is roughly five dictations a
   minute before HTTP 429, which both clients retry with backoff. `google/gemini-3.5-flash-lite` spends
   32 completion tokens for the same work, which roughly doubles the headroom.
+- **ElevenLabs Scribe v2 is more accurate on Turkish technical speech and about twice as slow.** On
+  the same recordings it returned "socket", "API", "repository" and "Groq" where Whisper returned
+  nothing, "AP", "repositor" and "grok", and it does not invent Turkish words the way Whisper does
+  ("güncellemlesin", "hareketimimiz"). It also takes 1.0 to 3.0 s against Whisper's 450 to 870 ms.
+  Full comparison, including the clip where both failed, in
+  [`evidence/elevenlabs-scribe-comparison.md`](evidence/elevenlabs-scribe-comparison.md).
+- **The realtime model is not a substitute for the batch model.** It dropped "Kubernetes" and turned
+  "PyQt" into "File create" on a clip where both were in the keyterms list it was given, and heard
+  "socket" as "fakat" four times on a 27 s recording the batch model got right. That measurement is
+  why the preview and the final text come from different calls.
+- **ElevenLabs costs about $1 to $2 a month at this usage.** $0.22 per audio hour for batch, $0.39 for
+  realtime, $0.05 on top for keyterms, against a measured median dictation of 9.9 s. Buying a plan
+  gives no discount: every plan's included hours are just its price divided by the same hourly rate.
 
 ## Known limitations
 
@@ -153,6 +181,12 @@ All from this machine, all reproducible from the log and the evidence files.
   the true division". Read its output before you send it.
 - **Turkish only**, in the sense that the prompts and the glossary rule are written in Turkish. The
   transcription request pins `language=tr`.
+- **ElevenLabs' minimum billing unit is unverified.** The docs say "billed per audio minute" without
+  saying whether a 10 s request is billed as 10 s or rounded up to a minute. If it rounds, the monthly
+  figures above multiply by about six.
+- **The glossary is sent twice with different limits.** Batch Scribe takes 100 keyterms of up to 50
+  characters; the realtime endpoint takes 50 of up to 20. A long term reaches the batch call and is
+  dropped from the preview, silently and by design.
 
 ## Author
 
