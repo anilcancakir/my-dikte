@@ -22,6 +22,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // policy here too makes accessory mode hold however the binary was actually launched
         // (for example, directly from the built .build/debug path during development).
         NSApplication.shared.setActivationPolicy(.accessory)
+        // Before the status item, because the settings window it opens needs a menu bar to be able
+        // to paste into. See `MainMenu` for why an app with no menu silently refuses Command-V.
+        MainMenu.install()
         // Built before the debug entries and the status item, because both wire onto it.
         pipeline = DictationPipeline()
         registerDebugEntries()
@@ -81,6 +84,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let controller = StatusItemController()
         controller.onOpenSettings = { [weak windowController] in
+            windowController?.show()
+        }
+        // The menu bar's Settings item opens the same window as the status item's, through the same
+        // controller: two ways in, one window.
+        AppMenuActions.onOpenSettings = { [weak windowController] in
             windowController?.show()
         }
         controller.onStart = { [weak self] in
