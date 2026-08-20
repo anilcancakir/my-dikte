@@ -81,6 +81,100 @@ struct TranscriptionClientTests {
         #expect(provider.offersQualityFields == false)
     }
 
+    @Test("ElevenLabs sends language_code, suppresses audio tags and disfluency, and uses keyterms")
+    func elevenLabsAppendsScribeParameters() {
+        var body = MultipartBody(boundary: "B")
+        let provider = ElevenLabsTranscriptionProvider(modelId: "scribe_v2")
+
+        let wasTruncated = provider.appendParameters(
+            to: &body,
+            glossaryTerms: [
+                "Kubernetes",
+                "Speech to Text",
+            ],
+            language: "tr"
+        )
+
+        let rendered = String(decoding: body.finalize().body, as: UTF8.self)
+        #expect(wasTruncated == false)
+        #expect(rendered.contains("name=\"language_code\"\r\n\r\ntr"))
+        #expect(rendered.contains("name=\"no_verbatim\"\r\n\r\ntrue"))
+        #expect(rendered.contains("name=\"tag_audio_events\"\r\n\r\nfalse"))
+        #expect(rendered.contains("name=\"timestamps_granularity\"\r\n\r\nnone"))
+        #expect(rendered.contains("name=\"keyterms\"\r\n\r\nKubernetes"))
+        #expect(rendered.contains("name=\"keyterms\"\r\n\r\nSpeech to Text"))
+        // The OpenAI-compatible spellings must not leak in alongside the Scribe ones.
+        #expect(rendered.contains("name=\"prompt\"") == false)
+        #expect(rendered.contains("name=\"response_format\"") == false)
+    }
+
+    @Test("ElevenLabs authenticates with xi-api-key and names the model field model_id")
+    func elevenLabsUsesItsOwnHeaderAndModelField() {
+        let provider = ElevenLabsTranscriptionProvider(modelId: "scribe_v2")
+
+        #expect(provider.authorization == .header(name: "xi-api-key"))
+        #expect(provider.authorization.headerName == "xi-api-key")
+        #expect(provider.authorization.headerValue(forKey: "secret") == "secret")
+        #expect(provider.modelFieldName == "model_id")
+        #expect(provider.keychainAccount == "transcription-elevenlabs")
+    }
+
+    @Test("the OpenAI-compatible providers keep the bearer header and the model field")
+    func openAICompatibleProvidersKeepTheirDefaults() {
+        let providers: [any TranscriptionProvider] = [
+            GroqTranscriptionProvider(modelId: "whisper-large-v3"),
+            OpenAITranscriptionProvider(modelId: "gpt-4o-transcribe"),
+            OpenRouterTranscriptionProvider(modelId: "whisper-1"),
+        ]
+
+        for provider in providers {
+            #expect(provider.authorization == .bearer)
+            #expect(provider.authorization.headerName == "Authorization")
+            #expect(provider.authorization.headerValue(forKey: "secret") == "Bearer secret")
+            #expect(provider.modelFieldName == "model")
+        }
+    }
+
+    @Test("ElevenLabs drops keyterms past the documented length and word limits")
+    func elevenLabsFiltersIneligibleKeyterms() {
+        let tooLong = String(repeating: "a", count: ElevenLabsTranscriptionProvider.keytermCharacterLimit + 1)
+        let tooManyWords = "one two three four five six"
+
+        #expect(ElevenLabsTranscriptionProvider.isEligibleKeyterm("Kubernetes") == true)
+        #expect(ElevenLabsTranscriptionProvider.isEligibleKeyterm("Speech to Text") == true)
+        #expect(ElevenLabsTranscriptionProvider.isEligibleKeyterm(tooLong) == false)
+        #expect(ElevenLabsTranscriptionProvider.isEligibleKeyterm(tooManyWords) == false)
+        #expect(ElevenLabsTranscriptionProvider.isEligibleKeyterm("   ") == false)
+
+        var body = MultipartBody(boundary: "B")
+        let provider = ElevenLabsTranscriptionProvider(modelId: "scribe_v2")
+        _ = provider.appendParameters(
+            to: &body,
+            glossaryTerms: [
+                "Kubernetes",
+                tooLong,
+                tooManyWords,
+            ],
+            language: "tr"
+        )
+
+        let rendered = String(decoding: body.finalize().body, as: UTF8.self)
+        #expect(rendered.contains("Kubernetes"))
+        #expect(rendered.contains(tooLong) == false)
+        #expect(rendered.contains(tooManyWords) == false)
+    }
+
+    @Test("ElevenLabs reports a truncation once the eligible glossary passes the keyterm cap")
+    func elevenLabsReportsKeytermTruncation() {
+        var body = MultipartBody(boundary: "B")
+        let provider = ElevenLabsTranscriptionProvider(modelId: "scribe_v2")
+        let overCap = (0...ElevenLabsTranscriptionProvider.keytermLimit).map { "term\($0)" }
+
+        let wasTruncated = provider.appendParameters(to: &body, glossaryTerms: overCap, language: "tr")
+
+        #expect(wasTruncated == true)
+    }
+
     // MARK: Error-body parsing
 
     @Test("parses the provider's own message out of a JSON error envelope")

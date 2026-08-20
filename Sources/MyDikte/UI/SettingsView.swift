@@ -435,9 +435,25 @@ private struct ModelsPane: View {
             TextField(
                 "Transcription model id",
                 text: $settings.transcriptionModelId,
-                prompt: Text(PipelineConfiguration.defaultTranscriptionModelId)
+                // Per provider, because the ids are not interchangeable: leaving this empty on
+                // ElevenLabs means `scribe_v2`, and showing Groq's model there would be a lie.
+                prompt: Text(settings.transcriptionProvider.defaultModelId)
             )
             .onChange(of: settings.transcriptionModelId) { _, _ in onChange() }
+
+            Divider()
+
+            Picker("Live preview source", selection: $settings.livePreviewProvider) {
+                ForEach(Settings.LivePreviewProvider.allCases, id: \.self) { provider in
+                    Text(provider.displayName).tag(provider)
+                }
+            }
+            .onChange(of: settings.livePreviewProvider) { _, _ in onChange() }
+
+            Text(livePreviewSummary)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
             Divider()
 
@@ -474,6 +490,23 @@ private struct ModelsPane: View {
         .padding(.top, 12)
     }
 
+    /// What choosing each preview source costs, stated where the choice is made. The on-device
+    /// option is free and offline; the other one bills per audio hour and streams the microphone to
+    /// a hosted model, and neither of those belongs only in a docblock.
+    private var livePreviewSummary: String {
+        switch settings.livePreviewProvider {
+        case .apple:
+            return "On device, tr-TR, free, and the audio never leaves this machine. Reads Turkish "
+                + "technical terms less well than the paid option."
+        case .elevenLabs:
+            return "Streams the microphone to ElevenLabs \(ElevenLabsLivePreview.modelId) at $0.39 per "
+                + "audio hour, roughly $1.70 a month at 50 dictations a day, on top of the "
+                + "transcription itself. Needs the ElevenLabs key on the Keys pane. The final text "
+                + "still comes from the batch call, which measured more accurate than the realtime "
+                + "model on longer recordings."
+        }
+    }
+
     /// What the requests will actually go to, built as a plain string rather than inline in the view:
     /// the interpolated concatenation defeated the type checker.
     private var inUseSummary: String {
@@ -505,6 +538,7 @@ private struct KeysPane: View {
 
     @State private var transcriptionKey = ""
     @State private var cleanupKey = ""
+    @State private var previewKey = ""
 
     var body: some View {
         Form {
@@ -527,8 +561,32 @@ private struct KeysPane: View {
                 + "goes in here again.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            // Only when the preview needs a key that no field above would have written. Choosing
+            // ElevenLabs for the preview while transcribing on Groq is a real configuration, and
+            // without this row the preview would silently never appear.
+            if let previewAccount, previewAccount != settings.transcriptionProvider.keychainAccount {
+                Divider()
+
+                KeyFieldRow(
+                    title: "Live preview API key",
+                    account: previewAccount,
+                    value: $previewKey
+                )
+
+                Text("The live preview is set to ElevenLabs while transcription is not, so its key "
+                    + "goes in separately here, under \(previewAccount). Selecting ElevenLabs for "
+                    + "transcription too makes this the same key as the one above.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding(.top, 12)
+    }
+
+    /// The account the preview reads, or nil when it runs on device and needs no key.
+    private var previewAccount: String? {
+        settings.livePreviewProvider.keychainAccount
     }
 
     /// Derived from the pipeline's own resolver rather than restated: the account depends on the

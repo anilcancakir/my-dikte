@@ -14,7 +14,12 @@ import os
 struct PipelineConfiguration: Sendable, Equatable {
     /// Measured on this machine at 0.38 to 0.66 s warm, and the more accurate model on Turkish
     /// (`evidence/step-02-groq-seam.txt`).
-    static let defaultTranscriptionModelId = "whisper-large-v3"
+    ///
+    /// Only the default for the OpenAI-compatible providers. Once ElevenLabs joined the list, one
+    /// shared constant became actively wrong: an empty model id would have sent `whisper-large-v3`
+    /// to Scribe, which answers HTTP 422 and reads as a broken app rather than a bad default. The
+    /// per-provider value lives on `Settings.TranscriptionProvider.defaultModelId`.
+    static let defaultTranscriptionModelId = Settings.TranscriptionProvider.groq.defaultModelId
 
     /// A starting default rather than a finished decision; the follow-on plan picks the winner from
     /// the log this pipeline writes.
@@ -54,6 +59,7 @@ struct PipelineConfiguration: Sendable, Equatable {
     let historyLimit: Int
     let audioCuesEnabled: Bool
     let livePreviewEnabled: Bool
+    let livePreviewProvider: Settings.LivePreviewProvider
     let advisoryParaphraseGuard: Bool
 
     private let cleanupEndpoint: String
@@ -61,7 +67,10 @@ struct PipelineConfiguration: Sendable, Equatable {
 
     init(settings: Settings) {
         provider = settings.transcriptionProvider
-        transcriptionModelId = Self.resolved(settings.transcriptionModelId, default: Self.defaultTranscriptionModelId)
+        transcriptionModelId = Self.resolved(
+            settings.transcriptionModelId,
+            default: settings.transcriptionProvider.defaultModelId
+        )
         cleanupModelId = Self.resolved(settings.cleanupModelId, default: Self.defaultCleanupModelId)
         glossaryTerms = settings.glossaryTerms
         autoInsert = settings.autoInsert
@@ -69,6 +78,7 @@ struct PipelineConfiguration: Sendable, Equatable {
         historyLimit = settings.historyLimit
         audioCuesEnabled = settings.audioCuesEnabled
         livePreviewEnabled = settings.livePreviewEnabled
+        livePreviewProvider = settings.livePreviewProvider
         advisoryParaphraseGuard = settings.advisoryParaphraseGuard
         cleanupEndpoint = Self.resolvedEndpoint(settings.cleanupEndpoint)
         rewriteEndpoint = Self.resolvedEndpoint(settings.rewriteEndpoint)
@@ -325,7 +335,7 @@ final class DictationPipeline {
 
     private let capture = AudioCapture()
     private let indicator = IndicatorPanel()
-    private let livePreview = LivePreview()
+    private let livePreview = LivePreviewRouter()
     private let logger = Logger(subsystem: BundleInfo.bundleIdentifier, category: "Pipeline")
 
     private var machine = PipelineStateMachine()
@@ -500,7 +510,12 @@ final class DictationPipeline {
         // After the capture is up and after the cue, so nothing about the preview can sit between
         // the shortcut and the first recorded buffer. It reports why there is no preview to the log
         // and returns; there is no failure path from here into the dictation.
-        livePreview.start(isEnabledInSettings: configuration.livePreviewEnabled)
+        livePreview.start(
+            provider: configuration.livePreviewProvider,
+            isEnabledInSettings: configuration.livePreviewEnabled,
+            glossaryTerms: configuration.glossaryTerms,
+            language: TranscriptionClient.defaultLanguage
+        )
         // Last, and off this actor entirely: the recording is already running by the time the
         // handshake starts.
         prewarmChatConnection(mode: activeMode, configuration: configuration)
@@ -959,6 +974,8 @@ final class DictationPipeline {
             provider = OpenAITranscriptionProvider(modelId: configuration.transcriptionModelId)
         case .openRouter:
             provider = OpenRouterTranscriptionProvider(modelId: configuration.transcriptionModelId)
+        case .elevenLabs:
+            provider = ElevenLabsTranscriptionProvider(modelId: configuration.transcriptionModelId)
         }
 
         let client = TranscriptionClient(provider: provider)

@@ -409,14 +409,19 @@ extension SFSpeechRecognizerAuthorizationStatus {
 }
 
 /// Bounded single-producer, single-consumer handoff from the audio tap to the one queue that talks
-/// to the Speech framework.
+/// to whatever consumes the preview audio: the Speech framework here, a WebSocket in
+/// `ElevenLabsLivePreview`.
 ///
 /// Same reasoning as `AudioSpool`, and one deliberate difference: this ring **drops** when it is
 /// full and counts the drop, where the spool turns a full spool into a thrown error. The spool's
 /// bytes are the dictation and losing one is a corrupt recording; these bytes are a preview that is
 /// thrown away, so a dropped buffer is a preview that lags for a moment and must never be able to
 /// fail a dictation.
-private final class BufferRing: @unchecked Sendable {
+///
+/// Not `private` because the second preview backend needs exactly this, unchanged. It stays in this
+/// file rather than moving to one of its own so the diff that added the second consumer does not
+/// also relocate the code the first one depends on.
+final class BufferRing: @unchecked Sendable {
     let droppedBuffers = Atomic<Int>(0)
     let rejectedBuffers = Atomic<Int>(0)
 

@@ -15,7 +15,7 @@ protocol TranscriptionProvider: Sendable {
     /// The provider's transcription endpoint.
     var baseURL: URL { get }
 
-    /// The model id sent in the request's `model` field.
+    /// The model id sent in the request's model field, named by `modelFieldName`.
     var modelId: String { get }
 
     /// The `KeychainStore` account holding this provider's API key.
@@ -26,10 +26,54 @@ protocol TranscriptionProvider: Sendable {
     /// so a provider that does not offer them answers false and the gate never runs against it.
     var offersQualityFields: Bool { get }
 
+    /// How this provider carries the API key. Defaults to the OpenAI-compatible bearer shape.
+    var authorization: ProviderAuthorization { get }
+
+    /// The multipart field name the model id goes in. Defaults to `model`.
+    var modelFieldName: String { get }
+
     /// Appends this provider's own request-parameter shape to `body`. Returns whether the
     /// glossary was truncated to fit a provider-documented cap, so the caller can log it without
     /// every conformance owning its own logger.
     func appendParameters(to body: inout MultipartBody, glossaryTerms: [String], language: String) -> Bool
+}
+
+/// The header a provider authenticates with.
+///
+/// Existed as a hardcoded `Authorization: Bearer` line inside `TranscriptionClient` until
+/// ElevenLabs, which reads its own `xi-api-key` header and answers HTTP 401 to the bearer form no
+/// matter how valid the key is. Two shapes rather than a free-form closure, because these are the
+/// only two any transcription API in this app uses and an enum keeps the choice reviewable.
+enum ProviderAuthorization: Sendable, Equatable {
+    /// `Authorization: Bearer <key>`.
+    case bearer
+    /// `<name>: <key>`, the raw key with no scheme prefix.
+    case header(name: String)
+
+    var headerName: String {
+        switch self {
+        case .bearer:
+            return "Authorization"
+        case .header(let name):
+            return name
+        }
+    }
+
+    func headerValue(forKey apiKey: String) -> String {
+        switch self {
+        case .bearer:
+            return "Bearer \(apiKey)"
+        case .header:
+            return apiKey
+        }
+    }
+}
+
+extension TranscriptionProvider {
+    /// Every OpenAI-compatible endpoint in this app, which is all of them but ElevenLabs.
+    var authorization: ProviderAuthorization { .bearer }
+
+    var modelFieldName: String { "model" }
 }
 
 /// Groq: `language` singular, `temperature=0`, `response_format=verbose_json`, and the glossary
@@ -124,6 +168,85 @@ struct OpenRouterTranscriptionProvider: TranscriptionProvider {
             body.appendField(name: "prompt", value: prompt)
         }
         return wasTruncated
+    }
+}
+
+/// ElevenLabs Scribe: `model_id` rather than `model`, an `xi-api-key` header rather than a bearer
+/// token, and the glossary carried as repeated `keyterms` fields.
+///
+/// **This is the one provider here whose glossary is a first-class API parameter.** Groq folds it
+/// into a free-text `prompt` that Whisper reads as preceding speech, and OpenRouter discards it
+/// outright (see `OpenRouterTranscriptionProvider`). Scribe takes structured keyterms and bills
+/// $0.05 an hour extra for them, on top of $0.22 an hour for the transcription itself.
+///
+/// Measured on four real Turkish recordings against Groq `whisper-large-v3`, verbatim in
+/// `evidence/elevenlabs-scribe-comparison.md`. Scribe reads Turkish technical speech better in the
+/// place it matters most for this user: it returned "socket", "API", "repository" and "Groq" where
+/// Whisper returned "soket", "AP", "repositor" and "grok", and it does not invent Turkish words the
+/// way Whisper does ("güncellemlesin", "hareketimimiz"). It costs about twice the latency, 1.0 to
+/// 1.6 s against Whisper's 450 to 870 ms on the same clips.
+///
+/// Three parameters are set here rather than exposed, each for a measured reason:
+///
+/// - `no_verbatim=true`, because Scribe transcribes disfluency faithfully by default and a dictation
+///   is not a transcript. The same clip returned "parap-para-parafens" without it and "parafes" with
+///   it, and the whole point of the cleanup stage is that the caret gets clean text.
+/// - `tag_audio_events=false`, because it defaults to true and writes `(laughter)` and `(footsteps)`
+///   into the text that would be pasted at the caret.
+/// - `timestamps_granularity=none`, because nothing in this app reads a timestamp. The per-word
+///   array still arrives with its `logprob` values, which is where `wordConfidence` comes from;
+///   `none` drops the timing fields, not the words.
+struct ElevenLabsTranscriptionProvider: TranscriptionProvider {
+    /// Scribe accepts up to 100 keyterms of at most 50 characters and 5 words each. The count is
+    /// from ElevenLabs' own transcription-options reference; a higher batch cap appears in the
+    /// LiveKit plugin's docstring, and the lower of the two is used here because exceeding a real
+    /// cap fails a dictation while staying under a generous one costs nothing.
+    static let keytermLimit = 100
+    static let keytermCharacterLimit = 50
+    static let keytermWordLimit = 5
+
+    let modelId: String
+
+    var baseURL: URL {
+        URL(string: "https://api.elevenlabs.io/v1/speech-to-text")!
+    }
+
+    var keychainAccount: String {
+        Settings.TranscriptionProvider.elevenLabs.keychainAccount
+    }
+
+    /// No segments and no `no_speech_prob` in a Scribe response, so the aggregate gate has nothing
+    /// to read. The per-word confidence it does return is logged rather than gated; see
+    /// `TranscriptionResponse.wordConfidence` for why a threshold is not being guessed at.
+    var offersQualityFields: Bool { false }
+
+    var authorization: ProviderAuthorization { .header(name: "xi-api-key") }
+
+    var modelFieldName: String { "model_id" }
+
+    func appendParameters(to body: inout MultipartBody, glossaryTerms: [String], language: String) -> Bool {
+        // 1. Scribe reads ISO 639-1 or 639-3, so this app's own "tr" passes through unchanged.
+        body.appendField(name: "language_code", value: language)
+        body.appendField(name: "no_verbatim", value: "true")
+        body.appendField(name: "tag_audio_events", value: "false")
+        body.appendField(name: "timestamps_granularity", value: "none")
+
+        // 2. Drop terms the API would reject before counting, so a single long term cannot silently
+        //    cost the glossary a slot it never used.
+        let eligible: [String] = glossaryTerms.filter(Self.isEligibleKeyterm)
+        for term in eligible.prefix(Self.keytermLimit) {
+            body.appendField(name: "keyterms", value: term)
+        }
+        return eligible.count > Self.keytermLimit
+    }
+
+    /// Whether a glossary term fits Scribe's documented per-keyterm limits.
+    static func isEligibleKeyterm(_ term: String) -> Bool {
+        let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= keytermCharacterLimit else {
+            return false
+        }
+        return trimmed.split(whereSeparator: { $0.isWhitespace }).count <= keytermWordLimit
     }
 }
 
@@ -270,6 +393,11 @@ final class TranscriptionClient: @unchecked Sendable {
     private static let initialBackoffSeconds: TimeInterval = 0.5
     private static let requestTimeoutSeconds: TimeInterval = 30
 
+    /// The language every request pins. Named here rather than left as a literal default because the
+    /// realtime preview has to send the same value to the same vendor, and two literals is how the
+    /// two paths would end up transcribing different languages.
+    static let defaultLanguage = "tr"
+
     private let provider: TranscriptionProvider
     private let session: URLSession
     private let readKey: @Sendable (String) -> KeychainStore.ReadResult
@@ -308,7 +436,7 @@ final class TranscriptionClient: @unchecked Sendable {
         audioData: Data,
         filename: String = "audio.m4a",
         glossaryTerms: [String],
-        language: String = "tr"
+        language: String = TranscriptionClient.defaultLanguage
     ) async throws -> Result {
         try Task.checkCancellation()
 
@@ -317,7 +445,7 @@ final class TranscriptionClient: @unchecked Sendable {
 
         // 2. Build the request once; every retry attempt reuses the same body.
         var body = MultipartBody()
-        body.appendField(name: "model", value: provider.modelId)
+        body.appendField(name: provider.modelFieldName, value: provider.modelId)
         let wasTruncated = provider.appendParameters(to: &body, glossaryTerms: glossaryTerms, language: language)
         if wasTruncated {
             logger.notice("glossary truncated to fit the provider's prompt token cap")
@@ -327,7 +455,10 @@ final class TranscriptionClient: @unchecked Sendable {
 
         var request = URLRequest(url: provider.baseURL, timeoutInterval: Self.requestTimeoutSeconds)
         request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue(
+            provider.authorization.headerValue(forKey: apiKey),
+            forHTTPHeaderField: provider.authorization.headerName
+        )
         request.setValue(sealed.contentTypeHeaderValue, forHTTPHeaderField: "Content-Type")
         request.httpBody = sealed.body
 
@@ -381,6 +512,12 @@ final class TranscriptionClient: @unchecked Sendable {
                     throw ProviderError.lowQualityTranscript(
                         reason: rejection.reason,
                         transcript: decoded.text
+                    )
+                }
+                if let confidence = decoded.wordConfidence {
+                    // Recorded, not gated. See `TranscriptionResponse.wordConfidence`.
+                    logger.notice(
+                        "per-word transcription confidence \(confidence, format: .fixed(precision: 3), privacy: .public)"
                     )
                 }
                 return Result(text: decoded.text, isReusedConnection: isReusedConnection)

@@ -57,6 +57,7 @@ struct SettingsPersistenceTests {
             retainAudio: false,
             audioCuesEnabled: false,
             livePreviewEnabled: false,
+            livePreviewProvider: .elevenLabs,
             advisoryParaphraseGuard: false,
             stopOnReturnOrSpace: false
         )
@@ -68,6 +69,7 @@ struct SettingsPersistenceTests {
         #expect(decoded.retainAudio == false)
         #expect(decoded.audioCuesEnabled == false)
         #expect(decoded.livePreviewEnabled == false)
+        #expect(decoded.livePreviewProvider == .elevenLabs)
         #expect(decoded.advisoryParaphraseGuard == false)
         #expect(decoded.stopOnReturnOrSpace == false)
         #expect(decoded.promptToggleShortcut == settings.promptToggleShortcut)
@@ -86,6 +88,28 @@ struct SettingsPersistenceTests {
     @Test("the paraphrase guard defaults to advisory")
     func advisoryGuardDefaultsToOn() {
         #expect(Settings.default.advisoryParaphraseGuard == true)
+    }
+
+    /// A preview must never be the reason a dictation costs money or leaves the machine, so the paid
+    /// backend is opt-in even though it reads Turkish better.
+    @Test("the live preview defaults to the on-device backend")
+    func livePreviewDefaultsToOnDevice() {
+        #expect(Settings.default.livePreviewProvider == .apple)
+        #expect(Settings.LivePreviewProvider.apple.keychainAccount == nil)
+        #expect(Settings.LivePreviewProvider.elevenLabs.keychainAccount == "transcription-elevenlabs")
+    }
+
+    /// One Keychain account per provider, so switching providers never overwrites a stored key, and
+    /// one default model id per provider, because sending Whisper's id to Scribe is an HTTP 422.
+    @Test("every transcription provider owns a distinct account and a usable default model")
+    func everyProviderHasItsOwnAccountAndDefaultModel() {
+        let accounts = Settings.TranscriptionProvider.allCases.map(\.keychainAccount)
+        #expect(Set(accounts).count == accounts.count)
+
+        #expect(Settings.TranscriptionProvider.elevenLabs.keychainAccount == "transcription-elevenlabs")
+        #expect(Settings.TranscriptionProvider.elevenLabs.defaultModelId == "scribe_v2")
+        #expect(Settings.TranscriptionProvider.groq.defaultModelId == "whisper-large-v3")
+        #expect(Settings.TranscriptionProvider.openAI.defaultModelId == "gpt-4o-transcribe")
     }
 
     /// A settings file written before a field existed must keep everything else it holds. A strict
@@ -114,6 +138,9 @@ struct SettingsPersistenceTests {
         #expect(loaded.glossaryTerms.contains("PyQt"))
         #expect(loaded.advisoryParaphraseGuard == true)
         #expect(loaded.stopOnReturnOrSpace == true)
+        // The third field added after this file shape was written. A file from before it must not
+        // silently opt into a preview backend that bills per hour.
+        #expect(loaded.livePreviewProvider == .apple)
     }
 
     /// The push-to-talk gesture is an ordered pair of physical keys, so both the order and the side

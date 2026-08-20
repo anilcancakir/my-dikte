@@ -47,6 +47,7 @@ struct Settings: Codable, Equatable {
         case groq
         case openAI
         case openRouter
+        case elevenLabs
 
         /// The `KeychainStore` account name for this provider's API key.
         var keychainAccount: String {
@@ -57,6 +58,60 @@ struct Settings: Codable, Equatable {
                 return "transcription-openai"
             case .openRouter:
                 return "transcription-openrouter"
+            case .elevenLabs:
+                return "transcription-elevenlabs"
+            }
+        }
+
+        /// The model this provider transcribes with when the model id field is left empty.
+        ///
+        /// Per provider rather than one shared constant, because the ids are not interchangeable:
+        /// sending `whisper-large-v3` to ElevenLabs is an HTTP 422, and the pane's grey placeholder
+        /// has to name the model the next dictation will actually use.
+        var defaultModelId: String {
+            switch self {
+            case .groq, .openRouter:
+                return "whisper-large-v3"
+            case .openAI:
+                return "gpt-4o-transcribe"
+            case .elevenLabs:
+                return "scribe_v2"
+            }
+        }
+    }
+
+    /// Where the words in the indicator come from while the user is still speaking.
+    ///
+    /// Two backends rather than a bool, because they differ in kind and not only in quality. Apple's
+    /// `SFSpeechRecognizer` runs on device, costs nothing, and works with no network; ElevenLabs
+    /// streams the microphone to a hosted model, is billed per audio hour, and needs a connection.
+    /// Measured on four real recordings, ElevenLabs reads Turkish technical speech visibly better
+    /// while it is still arriving, and that is the whole point of a preview. Apple stays the default
+    /// because a preview must never be the reason a dictation costs money or leaves the machine.
+    enum LivePreviewProvider: String, Codable, CaseIterable {
+        case apple
+        case elevenLabs
+
+        /// The `KeychainStore` account the realtime stream authenticates with. The batch and the
+        /// realtime paths deliberately share one ElevenLabs account: it is one vendor, one key, and
+        /// a second account would only mean entering the same secret twice.
+        var keychainAccount: String? {
+            switch self {
+            case .apple:
+                return nil
+            case .elevenLabs:
+                return TranscriptionProvider.elevenLabs.keychainAccount
+            }
+        }
+
+        /// The label in the picker. The raw values are Swift case names, and "apple" alone does not
+        /// say that the choice is between running on this machine and paying per hour.
+        var displayName: String {
+            switch self {
+            case .apple:
+                return "Apple, on device"
+            case .elevenLabs:
+                return "ElevenLabs, realtime"
             }
         }
     }
@@ -78,6 +133,11 @@ struct Settings: Codable, Equatable {
     /// The on-device live preview in the indicator while recording. On unless it is turned off:
     /// it costs no API call and no network, and it is the feature the user asked for by name.
     var livePreviewEnabled: Bool
+    /// Which backend the live preview streams through. Reopened the field list for the third time,
+    /// and for the same kind of reason as `stopOnReturnOrSpace`: this is the only setting in the app
+    /// that decides whether a feature spends money and sends microphone audio off the machine, so it
+    /// cannot live in code. Defaults to `.apple`, which is free and on device.
+    var livePreviewProvider: LivePreviewProvider
     /// Whether a paraphrase concern lets the cleanup through (advisory) or discards it in favour of
     /// the raw transcript (strict). Advisory unless it is turned off, on the strength of a
     /// measurement rather than a preference: over one day of real use the guard rejected three
@@ -107,14 +167,15 @@ struct Settings: Codable, Equatable {
         retainAudio: true,
         audioCuesEnabled: true,
         livePreviewEnabled: true,
+        livePreviewProvider: .apple,
         advisoryParaphraseGuard: true,
         stopOnReturnOrSpace: true
     )
 }
 
 extension Settings {
-    /// Decodes every field strictly except `advisoryParaphraseGuard` and `stopOnReturnOrSpace`, which
-    /// fall back to their defaults when the file does not carry them.
+    /// Decodes every field strictly except `advisoryParaphraseGuard`, `stopOnReturnOrSpace` and
+    /// `livePreviewProvider`, which fall back to their defaults when the file does not carry them.
     ///
     /// The general rule for this file stands: a file that will not decode is replaced by defaults,
     /// because a background app must not die on a corrupt settings file. These two keys are exempt
@@ -143,6 +204,8 @@ extension Settings {
         retainAudio = try container.decode(Bool.self, forKey: .retainAudio)
         audioCuesEnabled = try container.decode(Bool.self, forKey: .audioCuesEnabled)
         livePreviewEnabled = try container.decode(Bool.self, forKey: .livePreviewEnabled)
+        livePreviewProvider = try container.decodeIfPresent(LivePreviewProvider.self, forKey: .livePreviewProvider)
+            ?? Settings.default.livePreviewProvider
         advisoryParaphraseGuard = try container.decodeIfPresent(Bool.self, forKey: .advisoryParaphraseGuard)
             ?? Settings.default.advisoryParaphraseGuard
         stopOnReturnOrSpace = try container.decodeIfPresent(Bool.self, forKey: .stopOnReturnOrSpace)
