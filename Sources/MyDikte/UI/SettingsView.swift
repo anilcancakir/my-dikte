@@ -512,10 +512,8 @@ private struct ModelsPane: View {
                 + "technical terms less well than the paid option."
         case .elevenLabs:
             return "Streams the microphone to ElevenLabs \(ElevenLabsLivePreview.modelId) at $0.39 per "
-                + "audio hour, roughly $1.70 a month at 50 dictations a day, on top of the "
-                + "transcription itself. Needs the ElevenLabs key on the Keys pane. The final text "
-                + "still comes from the batch call, which measured more accurate than the realtime "
-                + "model on longer recordings."
+                + "audio hour. Needs the ElevenLabs key on the Keys pane. With the live preview on, "
+                + "its transcript is also the pasted text unless the upload below is turned on."
         }
     }
 
@@ -523,12 +521,13 @@ private struct ModelsPane: View {
     /// so neither is described as the safe one.
     private var batchVerificationSummary: String {
         if settings.batchVerification {
-            return "The realtime stream draws the live text and the audio is also uploaded to "
-                + "scribe_v2, whose answer is the one pasted. More accurate on longer recordings, "
-                + "about 700 ms slower, and it bills the same audio twice ($0.61 an audio hour)."
+            return "The realtime stream draws the live text and the audio is also uploaded to the "
+                + "transcription model above, whose answer is the one pasted. With scribe_v2 that is "
+                + "more accurate on longer recordings, about a second slower, and it bills the same "
+                + "audio twice ($0.61 an audio hour)."
         }
         return "The realtime stream is the transcript, so one dictation costs one transcription "
-            + "($0.39 an audio hour) and the text lands about 210 ms after you stop. This is how "
+            + "($0.39 an audio hour) and the text lands 200 to 520 ms after you stop. This is how "
             + "ElevenLabs' own examples use it. Measured cost: the realtime model reads longer "
             + "technical speech worse than the batch one, and has dropped glossary terms it was given."
     }

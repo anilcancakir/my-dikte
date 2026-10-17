@@ -76,7 +76,10 @@ better on all three axes (see below).
 **Live preview source.** Apple's on-device `SFSpeechRecognizer` (free, offline, nothing leaves the
 machine) or ElevenLabs Scribe v2 realtime ($0.39 per audio hour, needs a connection, reads Turkish
 better). Apple is the default, because a preview must never be the reason a dictation costs money.
-Either way the text that reaches the caret comes from the batch call, not the preview.
+Apple's text is always thrown away. With ElevenLabs, the realtime transcript is also the pasted text
+unless **Also upload for a second, more accurate reading** is on, in which case the audio is also
+uploaded to the configured transcription model (batch `scribe_v2` when the provider is ElevenLabs)
+and that answer is pasted.
 
 **Glossary.** Terms you say often: product names, libraries, commands. It goes to the transcription
 request as a decoding hint and to the cleanup model as a spelling reference.
@@ -126,11 +129,13 @@ Two hosted services and one on-device model:
   and its output is thrown away, because the authoritative text comes from the batch path. Neither
   Groq nor Whisper has a streaming endpoint, so a preview cannot come from the same call that
   produces the final text.
-- **ElevenLabs Scribe v2 realtime** over a WebSocket: the live preview, optionally, instead of Apple.
-  Words appear about 2.4 s into the recording and are rewritten in place as the model changes its
-  mind, and the last segment lands roughly 210 ms after the shortcut is released. Its text is still
-  thrown away: measured on nine recordings the realtime model is worse than the batch model at the
-  thing that matters here, so the preview is early and the paste is right.
+- **ElevenLabs Scribe v2 realtime** over a WebSocket: the live preview, optionally, instead of Apple,
+  and by default the transcript too. Words appear about 2.4 s into the recording and are rewritten
+  in place as the model changes its mind, and the last segment lands 200 to 520 ms after the
+  shortcut is released (measured 2026-10-17 on nine recordings), against 0.8 to 2.2 s for a batch
+  `scribe_v2` upload of the same audio. The server cuts a segment on its own at
+  about 36 s of audio, so the app commits one itself at the first pause past 20 s (at 30 s
+  regardless) and joins every segment into the dictation.
 
 Between them, several checks that cost nothing and run locally: leading digital silence is trimmed
 before upload, voice activity detection stops a silent recording before any request is made, a
@@ -165,10 +170,12 @@ All from this machine, all reproducible from the log and the evidence files.
   ("güncellemlesin", "hareketimimiz"). It also takes 1.0 to 3.0 s against Whisper's 450 to 870 ms.
   Full comparison, including the clip where both failed, in
   [`evidence/elevenlabs-scribe-comparison.md`](evidence/elevenlabs-scribe-comparison.md).
-- **The realtime model is not a substitute for the batch model.** It dropped "Kubernetes" and turned
-  "PyQt" into "File create" on a clip where both were in the keyterms list it was given, and heard
-  "socket" as "fakat" four times on a 27 s recording the batch model got right. That measurement is
-  why the preview and the final text come from different calls.
+- **The realtime model reads worse than the batch model.** It dropped "Kubernetes" and turned "PyQt"
+  into "File create" on a clip where both were in the keyterms list it was given, heard "socket" as
+  "fakat" four times on a 27 s recording the batch model got right, and in a later retest heard it
+  as "fakültesi" and "A'dan Z'ye" as "AdamZB". Short dictations come out about the same. That is the
+  trade behind the upload toggle: realtime is faster and bills the audio once, batch is right more
+  often.
 - **ElevenLabs costs about $1 to $2 a month at this usage.** $0.22 per audio hour for batch, $0.39 for
   realtime, $0.05 on top for keyterms, against a measured median dictation of 9.9 s. Buying a plan
   gives no discount: every plan's included hours are just its price divided by the same hourly rate.

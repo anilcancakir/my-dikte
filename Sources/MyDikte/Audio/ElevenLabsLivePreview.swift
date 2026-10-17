@@ -5,23 +5,28 @@ import os
 
 /// The live preview, streamed to ElevenLabs Scribe v2 realtime instead of transcribed on device.
 ///
-/// Same job and same surface as `LivePreview`: words in the indicator while the user is still
-/// speaking, thrown away afterwards, never reaching the caret, the clipboard, the cleanup call, the
-/// paraphrase guard or the log. The authoritative text still comes from the batch transcription
-/// call, and that is a measured decision rather than a conservative one.
+/// Two jobs on one socket. It draws words in the indicator while the user is still speaking, like
+/// `LivePreview`, and unless `Settings.batchVerification` is on, its committed transcript is also the
+/// dictation itself (`finishAndAwaitTranscript`), so the audio is never uploaded a second time.
 ///
-/// **Why the realtime model is not the final text.** Measured on nine real Turkish recordings
-/// (`evidence/elevenlabs-scribe-comparison.md`), `scribe_v2_realtime` reads short speech about as
-/// well as the batch model and materially worse as the clip grows: on one 27 s recording it heard
-/// "socket" as "fakat" four times, and on a 12 s one it dropped "Kubernetes" entirely and turned
-/// "PyQt" into "File create", both of which were in the glossary it was given. The reason is
-/// structural: a streaming model commits to words with limited lookahead, while the batch model sees
-/// the whole recording. So realtime feeds the preview, where being early beats being right, and
-/// batch produces the text that gets pasted, where the opposite holds.
+/// **The realtime model reads worse than the batch one**, which is why the upload stays available as
+/// a setting. Measured on nine real Turkish recordings (`evidence/elevenlabs-scribe-comparison.md`)
+/// and again on 2026-10-17, `scribe_v2_realtime` reads short speech about as well as `scribe_v2` and
+/// materially worse as the clip grows: it hears "socket" as "fakat" or "fakültesi", and on a 12 s
+/// clip it dropped "Kubernetes" and turned "PyQt" into "File create", both of which were in its
+/// glossary. A streaming model commits to words with limited lookahead; the batch model sees the
+/// whole recording.
 ///
-/// **This one costs money**, unlike the on-device preview: $0.39 per audio hour, about $1.70 a month
-/// at 50 dictations a day, and it sends microphone audio off the machine. Both of those are why
-/// `Settings.livePreviewProvider` exists and defaults to `.apple`.
+/// **A session is several segments, not one.** The server commits on its own after about 36 s of
+/// audio whatever the commit strategy (ElevenLabs, "Transcripts and commit strategies"), and the first
+/// version of this file kept only the segment that answered the final commit: a 44.6 s dictation
+/// pasted its last sentence. So the client now commits a segment itself at a pause past
+/// `softCommitSeconds`, or at `hardCommitSeconds` regardless, which is the 20 to 30 s cadence the same
+/// page recommends, keeps every segment in a `Transcript`, and treats the session as finished once
+/// every commit it sent has been answered.
+///
+/// **This one costs money**, unlike the on-device preview: $0.39 per audio hour, and it sends
+/// microphone audio off the machine. Both of those are why `Settings.livePreviewProvider` exists.
 ///
 /// **Deliberately not `@MainActor`,** for the same reason `AudioCapture` and `LivePreview` are not:
 /// `accept(_:)` is called from the `AVAudioEngine` tap callback, and a main-actor call from that
@@ -97,6 +102,35 @@ final class ElevenLabsLivePreview: @unchecked Sendable {
     /// own VAD silence threshold (1.5 s), which is the window their model treats as an end of speech.
     static let trailingSilenceSeconds: Double = 1.0
 
+    /// Past this much uncommitted audio, the next pause commits the segment.
+    ///
+    /// The low end of the 20 to 30 s cadence ElevenLabs recommends, and long enough that a normal
+    /// dictation (median 9.9 s, longest measured 44.6 s) is one segment or two, since every commit
+    /// costs the model the lookahead it would have had across the boundary.
+    static let softCommitSeconds: Double = 20
+
+    /// At this much uncommitted audio the segment is committed whether or not the user is pausing.
+    ///
+    /// Six seconds under the server's own commit at about 36 s, so the server's never fires: a
+    /// commit the client did not send would arrive as a reply nobody counted.
+    static let hardCommitSeconds: Double = 30
+
+    /// A chunk counts as quiet when its RMS is under this multiple of the session's noise floor, 14 dB.
+    ///
+    /// Relative to the floor rather than an absolute level, for the reason `VoiceActivity` gives: one
+    /// microphone idles at -70 dBFS, another at -35. And the floor rather than the loudest chunk,
+    /// because one knock or cough sets a peak that ordinary speech sits 20 dB under. Measured on nine
+    /// real recordings: floors sit at -41 to -63 dBFS and median speech at -16 to -20, so 14 dB above
+    /// the floor never landed inside a word.
+    static let pauseFloorRatio: Float = 5
+
+    /// How long the audio has to stay quiet before it counts as a pause, about two send chunks.
+    ///
+    /// One chunk is 100 to 170 ms, which is a gap between words as often as it is a pause, and the
+    /// last word of a segment deserves some right-context for the same reason `trailingSilenceSeconds`
+    /// gives the final one a full second.
+    static let minimumPauseSeconds: Double = 0.3
+
     /// The bound on what the indicator shows, and the tail-truncation rule, both borrowed from
     /// `LivePreview` so the two backends cannot drift into drawing differently.
     static let displayCharacterLimit = LivePreview.displayCharacterLimit
@@ -110,8 +144,13 @@ final class ElevenLabsLivePreview: @unchecked Sendable {
     /// still upload the audio to the batch endpoint, which is exactly what it does.
     enum TranscriptOutcome: Sendable, Equatable {
         case transcript(String)
+        /// Every commit was answered and no segment held a word. The caller uploads, because the
+        /// batch model may still hear what the realtime one did not.
+        case empty
         /// The commit was sent and nothing came back inside the deadline.
         case timedOut
+        /// The socket died during the dictation, so no reply can come and nothing is waited for.
+        case socketFailed
         /// No socket was open, so there was nothing to commit. The preview was off, unauthorised,
         /// or the provider was not this one.
         case notRunning
@@ -143,9 +182,17 @@ final class ElevenLabsLivePreview: @unchecked Sendable {
     private var socket: URLSessionWebSocketTask?
     private var pending: [Float] = []
     private var partialCount = 0
-    /// Resumed by the first committed transcript after a commit, or by the timeout, whichever lands
-    /// first. Cleared as it is resumed, because a continuation resumed twice is a crash.
+    /// Every segment of the running session, the commits sent and the replies received.
+    private var transcript = Transcript()
+    /// When the running session commits a segment on its own.
+    private var schedule = CommitSchedule()
+    /// Set when the running session's socket fails while it is still being listened to.
+    private var socketFailed = false
+    /// Resumed once every commit is answered, or by the timeout, whichever lands first. Cleared as it
+    /// is resumed, because a continuation resumed twice is a crash.
     private var transcriptWaiter: CheckedContinuation<TranscriptOutcome, Never>?
+    /// Identifies the waiter above, so a deadline set for one dictation cannot resume the next one's.
+    private var waiterID: UInt64 = 0
 
     init(
         readKey: @escaping @Sendable (String) -> KeychainStore.ReadResult = KeychainStore.read,
@@ -199,11 +246,10 @@ final class ElevenLabsLivePreview: @unchecked Sendable {
 
     /// The socket URL for one dictation.
     ///
-    /// `commit_strategy=manual` rather than `vad`: a dictation is one segment that ends when the user
-    /// releases the shortcut, and letting the server's silence detector commit would split a single
-    /// thought into several transcripts at every pause for breath. ElevenLabs commits on its own
-    /// after about 36 seconds of accumulated audio regardless, which is past the longest dictation
-    /// this app has recorded (27.3 s) but not unreachable.
+    /// `commit_strategy=manual` rather than `vad`: letting the server's silence detector commit would
+    /// split a single thought at every pause for breath, and every commit it sent would be a reply
+    /// the `Transcript` did not count. A long dictation is still split, but by `CommitSchedule`, at
+    /// most once every 20 to 30 s.
     static func socketURL(glossaryTerms: [String], language: String) -> URL {
         var items: [URLQueryItem] = [
             URLQueryItem(name: "model_id", value: modelId),
@@ -267,6 +313,15 @@ final class ElevenLabsLivePreview: @unchecked Sendable {
         [Float](repeating: 0, count: Int(AudioCapture.sampleRate * trailingSilenceSeconds))
     }
 
+    /// The root mean square of `frames`, or `0` for none.
+    static func rms(of frames: [Float]) -> Float {
+        guard !frames.isEmpty else {
+            return 0
+        }
+        let sumOfSquares: Float = frames.reduce(0) { $0 + $1 * $1 }
+        return (sumOfSquares / Float(frames.count)).squareRoot()
+    }
+
     /// What the indicator draws, delegated so both backends truncate identically.
     static func displayText(_ text: String, limit: Int = ElevenLabsLivePreview.displayCharacterLimit) -> String {
         LivePreview.displayText(text, limit: limit)
@@ -308,7 +363,17 @@ final class ElevenLabsLivePreview: @unchecked Sendable {
         self.socket = socket
         pending.removeAll(keepingCapacity: true)
         partialCount = 0
+        transcript = Transcript()
+        schedule = CommitSchedule()
+        socketFailed = false
+        // A dictation that was cancelled while it waited is still parked on its continuation, and
+        // the generation bump above means none of its replies will ever be applied. Released here
+        // rather than left to its deadline, which the next dictation's waiter would otherwise
+        // overwrite, leaking the continuation and hanging that run for good.
+        let abandoned: CheckedContinuation<TranscriptOutcome, Never>? = transcriptWaiter
+        transcriptWaiter = nil
         lock.unlock()
+        abandoned?.resume(returning: .timedOut)
 
         socket.resume()
         receive(on: socket, generation: generation)
@@ -330,12 +395,14 @@ final class ElevenLabsLivePreview: @unchecked Sendable {
         generation.wrappingAdd(1, ordering: .acquiringAndReleasing)
         // Teardown runs on the same serial queue as every send, so audio already in flight is sent
         // before the commit rather than after it, and the main actor never waits on the socket.
+        let socket: URLSessionWebSocketTask? = lock.withLock { self.socket }
         sendQueue.async { [self] in
-            flushAndCommit()
+            flushAndCommit(on: socket)
             // Closing immediately would cancel the commit that was just sent, so the socket gets the
             // measured round trip plus headroom and is then released whether or not the reply came.
+            // Only this socket: a dictation started inside that second already holds a new one.
             sendQueue.asyncAfter(deadline: .now() + Self.commitGraceSeconds) { [self] in
-                closeSocket()
+                closeSocket(socket)
             }
         }
     }
@@ -345,12 +412,12 @@ final class ElevenLabsLivePreview: @unchecked Sendable {
     /// second time.
     ///
     /// This is the mode ElevenLabs' own client examples use: they render `committedTranscripts` as
-    /// the result rather than following the stream with a batch request. It is offered as a choice
-    /// rather than as the default because the realtime model measured worse than the batch one on
-    /// this user's longer recordings; see this type's own documentation.
+    /// the result rather than following the stream with a batch request. `Settings.batchVerification`
+    /// turns it off, because the realtime model measured worse than the batch one on this user's
+    /// longer recordings; see this type's own documentation.
     ///
-    /// Never throws and never fails a dictation. A deadline miss comes back as `.timedOut` and the
-    /// caller uploads the audio instead, which is slower but produces text.
+    /// Never throws and never fails a dictation. A deadline miss or a dead socket comes back as a
+    /// value and the caller uploads the audio instead, which is slower but produces text.
     func finishAndAwaitTranscript(timeout: Duration) async -> TranscriptOutcome {
         guard isListening.exchange(false, ordering: .acquiringAndReleasing) else {
             return .notRunning
@@ -358,25 +425,37 @@ final class ElevenLabsLivePreview: @unchecked Sendable {
         // Deliberately no generation bump here, unlike `stop()`. The bump exists to stop a late
         // message repainting a finished dictation, and in this mode the late message *is* the
         // dictation.
+        let socket: URLSessionWebSocketTask? = lock.withLock { self.socket }
+
         let outcome: TranscriptOutcome = await withCheckedContinuation { continuation in
+            // 1. A socket that already died will never answer, so its waiter is not installed at all.
             lock.lock()
+            if socketFailed {
+                lock.unlock()
+                continuation.resume(returning: .socketFailed)
+                return
+            }
+            waiterID &+= 1
+            let id: UInt64 = waiterID
             transcriptWaiter = continuation
             lock.unlock()
 
+            // 2. The rest of the audio and the final commit, on the queue every send uses.
             sendQueue.async { [self] in
-                flushAndCommit()
+                flushAndCommit(on: socket)
             }
 
+            // 3. The deadline, tagged so it can only ever resume this waiter.
             Task { [weak self] in
                 try? await Task.sleep(for: timeout)
-                self?.resumeWaiter(with: .timedOut)
+                self?.resumeWaiter(with: .timedOut, ifWaiterID: id)
             }
         }
 
-        if case .timedOut = outcome {
+        if outcome == .timedOut {
             logger.error("the realtime transcript did not arrive before the deadline")
         }
-        closeSocket()
+        closeSocket(socket)
         return outcome
     }
 
@@ -423,6 +502,29 @@ final class ElevenLabsLivePreview: @unchecked Sendable {
             return
         }
         send(frames: ready, commit: false, on: socket)
+        commitSegmentIfDue(after: ready, on: socket)
+    }
+
+    /// Commits the running segment when the `CommitSchedule` says so. `sendQueue` only, after the
+    /// chunk it decides from has been sent, so the boundary falls after that audio rather than before.
+    private func commitSegmentIfDue(after frames: [Float], on socket: URLSessionWebSocketTask) {
+        let chunkRMS: Float = Self.rms(of: frames)
+
+        lock.lock()
+        let due: Bool = schedule.recordChunk(
+            seconds: Double(frames.count) / AudioCapture.sampleRate,
+            rms: chunkRMS
+        )
+        if due {
+            transcript.recordCommit(isFinal: false)
+        }
+        lock.unlock()
+
+        guard due else {
+            return
+        }
+        logger.notice("realtime segment committed mid-dictation")
+        socket.send(.string(Self.audioChunkMessage(base64Audio: "", commit: true))) { _ in }
     }
 
     private func send(frames: [Float], commit: Bool, on socket: URLSessionWebSocketTask) {
@@ -445,27 +547,45 @@ final class ElevenLabsLivePreview: @unchecked Sendable {
     /// The socket is deliberately not cleared here, unlike in the first version of this file: both
     /// callers still need the reply to arrive, one to draw a last preview and one because that reply
     /// is the dictation. `closeSocket` is what releases it.
-    private func flushAndCommit() {
+    ///
+    /// `socket` is the one the caller captured when the dictation ended. When a later dictation has
+    /// replaced it by the time this runs, nothing is sent and none of the new session's state is
+    /// touched: its schedule, transcript and pending audio belong to it.
+    private func flushAndCommit(on socket: URLSessionWebSocketTask?) {
         lock.lock()
-        let socket: URLSessionWebSocketTask? = self.socket
-        let remaining: [Float] = pending
-        let partialCount: Int = self.partialCount
-        pending.removeAll(keepingCapacity: true)
-        lock.unlock()
-
-        guard let socket else {
+        guard let socket, self.socket === socket else {
+            lock.unlock()
             return
         }
-        ring.drain { _ in }
+        var remaining: [Float] = pending
+        let partialCount: Int = self.partialCount
+        pending.removeAll(keepingCapacity: true)
+        // Closed first, so a buffer drained after this point cannot schedule a commit behind the
+        // final one, which would leave a reply outstanding that nothing is waiting to count.
+        schedule.close()
+        lock.unlock()
+
+        // The tap's last buffers are still the dictation: up to one buffer of speech sits here when
+        // the shortcut is released, and it is the end of the last word.
+        ring.drain { buffer in
+            guard let channel = buffer.floatChannelData else {
+                return
+            }
+            remaining.append(contentsOf: UnsafeBufferPointer(start: channel[0], count: Int(buffer.frameLength)))
+        }
 
         if !remaining.isEmpty {
             send(frames: remaining, commit: false, on: socket)
         }
         // Then silence, so the last word is followed by context rather than by the stream ending
-        // mid-syllable. See `trailingSilenceSeconds` for why this is not a delay.
+        // mid-syllable. See `trailingSilenceSeconds` for why this is not a delay. It also keeps the
+        // final commit above the server's 0.3 s minimum, so it is always answered with a segment.
         send(frames: Self.trailingSilence(), commit: false, on: socket)
-        // An empty chunk with `commit: true` is how the protocol asks for the final segment; the
-        // last words of the dictation are in that transcript and nowhere else.
+        // An empty chunk with `commit: true` is how the protocol asks for the final segment. Counted
+        // before it is sent, so the reply cannot land before the session knows to wait for it.
+        lock.lock()
+        transcript.recordCommit(isFinal: true)
+        lock.unlock()
         socket.send(.string(Self.audioChunkMessage(base64Audio: "", commit: true))) { _ in }
 
         let dropped: Int = ring.droppedBuffers.load(ordering: .relaxed)
@@ -479,18 +599,28 @@ final class ElevenLabsLivePreview: @unchecked Sendable {
         )
     }
 
-    /// Releases the socket. Idempotent, and safe to call from either mode's teardown.
-    private func closeSocket() {
+    /// Releases `socket`, and clears the stored one only when it is still that socket. Idempotent,
+    /// and safe to call from either mode's teardown.
+    private func closeSocket(_ socket: URLSessionWebSocketTask?) {
+        guard let socket else {
+            return
+        }
         lock.lock()
-        let socket: URLSessionWebSocketTask? = self.socket
-        self.socket = nil
+        if self.socket === socket {
+            self.socket = nil
+        }
         lock.unlock()
-        socket?.cancel(with: .normalClosure, reason: nil)
+        socket.cancel(with: .normalClosure, reason: nil)
     }
 
-    /// Hands `outcome` to whoever is waiting on the transcript, exactly once.
-    private func resumeWaiter(with outcome: TranscriptOutcome) {
+    /// Hands `outcome` to whoever is waiting on the transcript, exactly once. With an id, only to the
+    /// waiter that id was issued to.
+    private func resumeWaiter(with outcome: TranscriptOutcome, ifWaiterID id: UInt64? = nil) {
         lock.lock()
+        guard id == nil || id == waiterID else {
+            lock.unlock()
+            return
+        }
         let waiter: CheckedContinuation<TranscriptOutcome, Never>? = transcriptWaiter
         transcriptWaiter = nil
         lock.unlock()
@@ -506,19 +636,36 @@ final class ElevenLabsLivePreview: @unchecked Sendable {
             }
             switch result {
             case .failure(let error):
-                // Expected on every normal teardown: closing cancels the socket, and the pending
-                // receive fails with it. Only a failure while still listening is worth a line.
-                if self.isListening.load(ordering: .acquiring) {
-                    self.logger.error("live preview socket failed: \(error.localizedDescription, privacy: .public)")
-                }
-                // A dead socket will never deliver the transcript, so a caller waiting on one is
-                // released now rather than left to sit out the whole deadline.
-                self.resumeWaiter(with: .timedOut)
+                self.socketDidFail(error, generation: generation)
             case .success(let message):
                 self.handle(message: message, generation: generation)
                 self.receive(on: socket, generation: generation)
             }
         }
+    }
+
+    /// A dead socket will never deliver the transcript, so a caller waiting on one is released now,
+    /// and one that has not started waiting yet is told not to.
+    ///
+    /// Expected on every normal teardown: closing cancels the socket and the pending receive fails
+    /// with it. Only a failure while still listening, or one a caller is waiting on, is worth a line,
+    /// and only this session's socket counts: a late failure from a socket that has moved on must
+    /// not mark the next dictation's.
+    private func socketDidFail(_ error: any Error, generation: UInt64) {
+        lock.lock()
+        guard self.generation.load(ordering: .acquiring) == generation else {
+            lock.unlock()
+            return
+        }
+        socketFailed = true
+        let waiter: CheckedContinuation<TranscriptOutcome, Never>? = transcriptWaiter
+        transcriptWaiter = nil
+        lock.unlock()
+
+        if isListening.load(ordering: .acquiring) || waiter != nil {
+            logger.error("live preview socket failed: \(error.localizedDescription, privacy: .public)")
+        }
+        waiter?.resume(returning: .socketFailed)
     }
 
     private func handle(message: URLSessionWebSocketTask.Message, generation: UInt64) {
@@ -531,14 +678,15 @@ final class ElevenLabsLivePreview: @unchecked Sendable {
 
         switch event.messageType {
         case "committed_transcript":
-            // The segment the commit asked for. It feeds the panel when a preview is still on screen,
-            // and it is the dictation itself when `finishAndAwaitTranscript` is waiting for it.
-            if let text = event.text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
-                resumeWaiter(with: .transcript(text))
-            }
-            publish(event.text, generation: generation)
+            // One segment, kept with every earlier one. When it answers the last outstanding commit
+            // the session is complete, and its joined text is the dictation for a caller waiting in
+            // `finishAndAwaitTranscript`.
+            update(generation: generation, isReply: true) { $0.recordCommitted(event.text) }
+        case "commit_throttled":
+            logger.notice("a realtime commit was throttled by the server")
+            update(generation: generation, isReply: true) { $0.recordThrottled() }
         case "partial_transcript", "final_transcript":
-            publish(event.text, generation: generation)
+            update(generation: generation, isReply: false) { $0.recordPartial(event.text) }
         case "session_started":
             logger.notice("live preview session started")
         default:
@@ -549,11 +697,46 @@ final class ElevenLabsLivePreview: @unchecked Sendable {
         }
     }
 
-    private func publish(_ text: String?, generation: UInt64) {
+    /// Applies one server event to the running session, hands the finished dictation to a waiting
+    /// caller once every commit is answered, and draws what the session now reads.
+    ///
+    /// Only for the session this receive loop belongs to: `start` and `stop` bump the generation, so
+    /// an event from a socket that has moved on can neither repaint the panel nor leak into the next
+    /// dictation's transcript. Checked under the lock, so it cannot pass just before `start` resets
+    /// the transcript it is about to change.
+    ///
+    /// Settlement is read only on a reply. A partial changes no count, so letting it settle the
+    /// session could only ever end it on a stale reading.
+    private func update(generation: UInt64, isReply: Bool, _ apply: (inout Transcript) -> Void) {
+        // 1. Mutate under the lock, and read everything the rest needs before releasing it.
+        lock.lock()
         guard self.generation.load(ordering: .acquiring) == generation else {
+            lock.unlock()
             return
         }
-        guard let text, !text.isEmpty else {
+        apply(&transcript)
+        let display: String = transcript.displayText
+        let settledText: String? = isReply && transcript.isSettled ? transcript.text : nil
+        let overCounted: Bool = transcript.repliesReceived > transcript.commitsSent
+        lock.unlock()
+
+        if isReply && overCounted {
+            // The server committed on its own, which `hardCommitSeconds` exists to prevent. The
+            // session will not settle and the caller uploads at the deadline instead of losing text.
+            logger.error("a realtime reply arrived for a commit this client did not send")
+        }
+
+        // 2. The waiter first, so the dictation is not held behind a main-actor hop for the panel.
+        if let settledText {
+            resumeWaiter(with: settledText.isEmpty ? .empty : .transcript(settledText))
+        }
+
+        // 3. Then the panel.
+        publish(display)
+    }
+
+    private func publish(_ text: String) {
+        guard !text.isEmpty else {
             return
         }
 
@@ -583,6 +766,121 @@ final class ElevenLabsLivePreview: @unchecked Sendable {
         }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+extension ElevenLabsLivePreview {
+    /// When the client commits a segment itself: at the first sustained pause past
+    /// `softCommitSeconds`, or at `hardCommitSeconds` regardless.
+    ///
+    /// A pause is audio under `pauseFloorRatio` times the session's noise floor for at least
+    /// `minimumPauseSeconds`. The floor is the quietest chunk so far, ignoring digital silence: a
+    /// Bluetooth link that has not opened reports exact zeros, and a zero floor would make no chunk
+    /// quiet relative to it.
+    struct CommitSchedule: Sendable, Equatable {
+        private(set) var uncommittedSeconds: Double = 0
+        private(set) var quietSeconds: Double = 0
+        private(set) var noiseFloorRMS: Float?
+        private(set) var isClosed: Bool = false
+
+        /// Records one sent chunk and says whether to commit the segment after it.
+        mutating func recordChunk(seconds: Double, rms: Float) -> Bool {
+            guard !isClosed else {
+                return false
+            }
+            uncommittedSeconds += seconds
+
+            // 1. The floor moves only on real microphone audio.
+            if Double(rms) >= LeadingSilence.silenceRMS {
+                noiseFloorRMS = min(noiseFloorRMS ?? rms, rms)
+            }
+
+            // 2. Quiet is relative to that floor; digital silence mid-dictation is quiet too.
+            let isQuiet: Bool = Double(rms) < LeadingSilence.silenceRMS
+                || noiseFloorRMS.map { rms < $0 * ElevenLabsLivePreview.pauseFloorRatio } == true
+            quietSeconds = isQuiet ? quietSeconds + seconds : 0
+
+            // 3. Commit at a pause past the soft threshold, or at the hard one regardless.
+            let isPause: Bool = quietSeconds >= ElevenLabsLivePreview.minimumPauseSeconds
+            let due: Bool = uncommittedSeconds >= ElevenLabsLivePreview.hardCommitSeconds
+                || (uncommittedSeconds >= ElevenLabsLivePreview.softCommitSeconds && isPause)
+            if due {
+                uncommittedSeconds = 0
+                quietSeconds = 0
+            }
+            return due
+        }
+
+        /// Called with the final commit. Nothing is committed after it.
+        mutating func close() {
+            isClosed = true
+        }
+    }
+
+    /// One realtime session's text: every committed segment in order, the partial being spoken now,
+    /// and the bookkeeping that says when the last segment is in.
+    ///
+    /// The server answers every commit in the order it was sent, with a `committed_transcript` (empty
+    /// for a segment that held only silence) or a `commit_throttled` when less than 0.3 s was
+    /// uncommitted, both measured on 2026-10-17. So once the final commit is sent, the session is
+    /// complete exactly when the replies have caught up with the commits.
+    struct Transcript: Sendable, Equatable {
+        private(set) var segments: [String] = []
+        private(set) var partial: String = ""
+        private(set) var commitsSent: Int = 0
+        private(set) var repliesReceived: Int = 0
+        private(set) var finalCommitSent: Bool = false
+
+        /// Every segment, joined: the dictation, once `isSettled`.
+        var text: String {
+            segments.joined(separator: " ")
+        }
+
+        /// What the indicator shows: the finished segments, then the one still being spoken.
+        var displayText: String {
+            (segments + [partial])
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
+        }
+
+        /// Exactly caught up, not at least. A reply nobody counted (a server commit this client did
+        /// not send) that lands after the client's own replies leaves the session unsettled, so the
+        /// caller uploads at the deadline rather than paste a dictation missing its last segment.
+        /// Counts cannot tell replies apart, so one that lands earlier still settles the session a
+        /// reply early; `hardCommitSeconds` is what keeps such a reply from existing, and a 91 s
+        /// recording on 2026-10-17 produced none.
+        var isSettled: Bool {
+            finalCommitSent && repliesReceived == commitsSent
+        }
+
+        /// Call before the commit message is sent, so its reply can never arrive uncounted.
+        mutating func recordCommit(isFinal: Bool) {
+            commitsSent += 1
+            if isFinal {
+                finalCommitSent = true
+            }
+        }
+
+        mutating func recordCommitted(_ text: String?) {
+            repliesReceived += 1
+            partial = ""
+            let trimmed: String = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !trimmed.isEmpty {
+                segments.append(trimmed)
+            }
+        }
+
+        /// A commit the server refused because under 0.3 s was uncommitted. It still answers that
+        /// commit, and it held no speech: an intermediate commit follows at least `softCommitSeconds`
+        /// of audio and the final one follows `trailingSilenceSeconds` of silence, so this is a guard
+        /// against a waiter sitting out its deadline rather than a path that loses words.
+        mutating func recordThrottled() {
+            repliesReceived += 1
+        }
+
+        mutating func recordPartial(_ text: String?) {
+            partial = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        }
     }
 }
 

@@ -766,14 +766,18 @@ final class DictationPipeline {
             advance(to: .transcribing)
             let transcribeStarted = ContinuousClock.now
             let raw: String
+            // The model that actually produced `raw`, for the log: the configured one names the upload
+            // target, and logging it for a realtime transcript made the two sources indistinguishable.
+            let transcribedWith: String
             let realtimeOutcome: ElevenLabsLivePreview.TranscriptOutcome? = await realtimeTranscript?.value
             if case .transcript(let text) = realtimeOutcome {
                 raw = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                transcribedWith = ElevenLabsLivePreview.modelId
                 logger.notice("realtime transcript, \(raw.count, privacy: .public) characters, no upload")
             } else {
-                // Either this run never had a socket, or the socket did not answer. Uploading is the
-                // slower path but it is the one that produces text, and the reason is already logged
-                // by whichever side gave up.
+                // No socket, a socket that died or did not answer in time, or one that heard no words.
+                // Uploading is the slower path but it is the one that produces text, and the batch
+                // model may hear what the realtime one did not. The outcome is logged below.
                 if let realtimeOutcome {
                     let cause = String(describing: realtimeOutcome)
                     logger.notice("realtime transcript unavailable (\(cause, privacy: .public)), uploading instead")
@@ -783,6 +787,7 @@ final class DictationPipeline {
                     glossaryTerms: configuration.glossaryTerms
                 )
                 raw = transcription.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                transcribedWith = configuration.transcriptionModelId
                 logger.notice("transcribed \(raw.count, privacy: .public) characters")
             }
             timings.record(.transcribe, seconds: Self.elapsed(since: transcribeStarted))
@@ -807,6 +812,7 @@ final class DictationPipeline {
                     rawTranscript: raw,
                     finalText: "",
                     reason: discardReason,
+                    transcribedWith: transcribedWith,
                     timings: timings.record(totalSeconds: Self.elapsed(since: releasedAt)),
                     configuration: configuration
                 )
@@ -863,6 +869,7 @@ final class DictationPipeline {
                 reason: choice.message,
                 rejectedCleanup: choice.rejectedCleanup,
                 guardConcern: choice.concern,
+                transcribedWith: transcribedWith,
                 timings: timings.record(totalSeconds: Self.elapsed(since: releasedAt)),
                 configuration: configuration
             )
@@ -1186,6 +1193,7 @@ final class DictationPipeline {
         reason: String?,
         rejectedCleanup: String? = nil,
         guardConcern: ParaphraseGuard.Concern? = nil,
+        transcribedWith: String? = nil,
         timings: DictationRecord.Timings,
         configuration: PipelineConfiguration
     ) {
@@ -1202,7 +1210,9 @@ final class DictationPipeline {
             paraphraseRejectionReason: reason,
             rejectedCleanup: rejectedCleanup,
             guardConcern: guardConcern,
-            transcriptionModelId: configuration.transcriptionModelId,
+            // The model behind `rawTranscript` when one ran, else the configured one, which is what a
+            // record made before any transcription (room tone) has to go on.
+            transcriptionModelId: transcribedWith ?? configuration.transcriptionModelId,
             cleanupModelId: configuration.cleanupModelId,
             timings: timings
         )

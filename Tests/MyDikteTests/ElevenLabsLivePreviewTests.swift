@@ -206,3 +206,211 @@ struct RealtimeTrailingSilenceTests {
         #expect(ElevenLabsLivePreview.trailingSilenceSeconds <= 1.0)
     }
 }
+
+/// The transcript of one realtime session, assembled from every committed segment.
+///
+/// The regression it guards: the server commits on its own after about 36 s of audio, and the first
+/// version kept only the segment that answered the final commit, so a 44.6 s dictation pasted its
+/// last sentence and nothing else.
+@Suite("Realtime transcript assembly")
+struct RealtimeTranscriptTests {
+    private typealias Transcript = ElevenLabsLivePreview.Transcript
+
+    @Test("every committed segment is kept, in order, and joined with one space")
+    func joinsEveryCommittedSegment() {
+        var transcript = Transcript()
+        transcript.recordCommit(isFinal: false)
+        transcript.recordCommitted(" İlk paragraf burada bitiyor. ")
+        transcript.recordCommit(isFinal: true)
+        transcript.recordCommitted("Son cümle.")
+
+        #expect(transcript.text == "İlk paragraf burada bitiyor. Son cümle.")
+    }
+
+    @Test("an empty committed segment answers its commit and adds nothing")
+    func emptySegmentAnswersWithoutAddingText() {
+        var transcript = Transcript()
+        transcript.recordCommit(isFinal: false)
+        transcript.recordCommitted("Bir.")
+        transcript.recordCommit(isFinal: true)
+        transcript.recordCommitted("")
+
+        #expect(transcript.isSettled)
+        #expect(transcript.text == "Bir.")
+    }
+
+    @Test("it settles only once the final commit is sent and every commit has had its reply")
+    func settlesOnTheLastReply() {
+        var transcript = Transcript()
+        transcript.recordCommit(isFinal: false)
+        #expect(!transcript.isSettled)
+
+        transcript.recordCommit(isFinal: true)
+        transcript.recordCommitted("Birinci.")
+        // The first reply answers the earlier commit; the final one is still in flight.
+        #expect(!transcript.isSettled)
+
+        transcript.recordCommitted("İkinci.")
+        #expect(transcript.isSettled)
+    }
+
+    @Test("a reply that lands before the final commit is sent does not settle the session")
+    func intermediateReplyDoesNotSettle() {
+        var transcript = Transcript()
+        transcript.recordCommit(isFinal: false)
+        transcript.recordCommitted("Ara segment.")
+
+        #expect(!transcript.isSettled)
+    }
+
+    @Test("a reply nobody counted never settles, so the last segment is waited for rather than lost")
+    func overCountDoesNotSettle() {
+        var transcript = Transcript()
+        // A server commit the client did not send: one reply more than the commits.
+        transcript.recordCommitted("Sunucunun kendi segmenti.")
+        transcript.recordCommit(isFinal: true)
+        transcript.recordCommitted("Son segment.")
+
+        #expect(transcript.repliesReceived > transcript.commitsSent)
+        #expect(!transcript.isSettled)
+    }
+
+    @Test("a throttled commit counts as answered, so a waiter is not left to time out")
+    func throttledCommitCountsAsAReply() {
+        var transcript = Transcript()
+        transcript.recordCommit(isFinal: false)
+        transcript.recordCommitted("Tamamı burada.")
+        transcript.recordCommit(isFinal: true)
+        transcript.recordThrottled()
+
+        #expect(transcript.isSettled)
+        #expect(transcript.text == "Tamamı burada.")
+    }
+
+    @Test("the preview shows the committed segments followed by the partial being spoken now")
+    func displayTextKeepsEarlierSegments() {
+        var transcript = Transcript()
+        transcript.recordCommit(isFinal: false)
+        transcript.recordCommitted("Önceki kısım.")
+        transcript.recordPartial("şu an söylenen")
+
+        #expect(transcript.displayText == "Önceki kısım. şu an söylenen")
+    }
+
+    @Test("a commit clears the partial it finalised, so the preview does not repeat it")
+    func committedSegmentReplacesItsPartial() {
+        var transcript = Transcript()
+        transcript.recordPartial("yarım cümle")
+        transcript.recordCommit(isFinal: true)
+        transcript.recordCommitted("Yarım cümle tamamlandı.")
+
+        #expect(transcript.displayText == "Yarım cümle tamamlandı.")
+    }
+}
+
+/// When the client commits a segment itself, so the server's own 36 s commit never fires.
+@Suite("Realtime commit schedule")
+struct RealtimeCommitScheduleTests {
+    private typealias Schedule = ElevenLabsLivePreview.CommitSchedule
+
+    /// One chunk as the send path produces it: about 170 ms.
+    private static let chunk: Double = 0.17
+    private static let floor: Float = 0.002
+    private static let speech: Float = 0.12
+
+    /// Speech until `seconds` of audio are uncommitted, after one floor-level chunk so the schedule
+    /// has a noise floor to measure pauses against.
+    private static func schedule(speakingFor seconds: Double) -> Schedule {
+        var schedule = Schedule()
+        _ = feed(&schedule, [floor])
+        while schedule.uncommittedSeconds + chunk < seconds {
+            _ = feed(&schedule, [speech])
+        }
+        return schedule
+    }
+
+    /// Whether each chunk, in order, committed the segment.
+    private static func feed(_ schedule: inout Schedule, _ levels: [Float]) -> [Bool] {
+        levels.map { schedule.recordChunk(seconds: chunk, rms: $0) }
+    }
+
+    @Test("a pause before the soft threshold does not commit")
+    func pauseBeforeTheSoftThresholdDoesNotCommit() {
+        var schedule = Self.schedule(speakingFor: ElevenLabsLivePreview.softCommitSeconds - 2)
+        let commits = Self.feed(&schedule, [Self.floor, Self.floor])
+
+        #expect(commits == [false, false])
+    }
+
+    @Test("past the soft threshold a sustained pause commits")
+    func sustainedPauseCommits() {
+        var schedule = Self.schedule(speakingFor: ElevenLabsLivePreview.softCommitSeconds)
+        let commits = Self.feed(&schedule, [Self.floor, Self.floor])
+
+        #expect(commits == [false, true])
+        #expect(schedule.uncommittedSeconds == 0)
+    }
+
+    @Test("one quiet chunk between words is not a pause")
+    func singleQuietChunkIsNotAPause() {
+        var schedule = Self.schedule(speakingFor: ElevenLabsLivePreview.softCommitSeconds)
+        let commits = Self.feed(&schedule, [Self.floor, Self.speech, Self.floor])
+
+        #expect(commits == [false, false, false])
+    }
+
+    @Test("speech that sits well above the floor is never taken for a pause")
+    func quietSpeechIsNotAPause() {
+        var schedule = Self.schedule(speakingFor: ElevenLabsLivePreview.softCommitSeconds)
+        let quietSpeech: Float = Self.floor * ElevenLabsLivePreview.pauseFloorRatio * 2
+        let commits = Self.feed(&schedule, [quietSpeech, quietSpeech])
+
+        #expect(commits == [false, false])
+    }
+
+    @Test("at the hard threshold the segment is committed mid-speech")
+    func hardThresholdCommitsRegardless() {
+        var schedule = Self.schedule(speakingFor: ElevenLabsLivePreview.hardCommitSeconds)
+        let commits = Self.feed(&schedule, [Self.speech])
+
+        #expect(commits == [true])
+    }
+
+    @Test("digital zeros from a Bluetooth link opening do not become the noise floor")
+    func digitalSilenceDoesNotSetTheFloor() {
+        var schedule = Schedule()
+        _ = Self.feed(&schedule, [0, Self.floor])
+
+        #expect(schedule.noiseFloorRMS == Self.floor)
+    }
+
+    @Test("an all-silent session still commits at the hard threshold")
+    func silentSessionCommitsAtTheHardThreshold() {
+        var schedule = Schedule()
+        let chunks = Int((ElevenLabsLivePreview.hardCommitSeconds / Self.chunk).rounded(.up))
+        let commits = Self.feed(&schedule, [Float](repeating: 0, count: chunks))
+
+        #expect(commits.contains(true))
+    }
+
+    @Test("once closed by the final commit, nothing more is committed")
+    func closedScheduleNeverCommits() {
+        var schedule = Self.schedule(speakingFor: ElevenLabsLivePreview.hardCommitSeconds)
+        schedule.close()
+        let commits = Self.feed(&schedule, [Self.speech])
+
+        #expect(commits == [false])
+    }
+
+    @Test("the hard threshold stays clear of the server's own commit at about 36 s")
+    func hardThresholdIsBelowTheServerCommit() {
+        #expect(ElevenLabsLivePreview.hardCommitSeconds <= 30)
+        #expect(ElevenLabsLivePreview.softCommitSeconds < ElevenLabsLivePreview.hardCommitSeconds)
+    }
+
+    @Test("a chunk's RMS is the root mean square of its samples")
+    func rmsOfAChunk() {
+        #expect(ElevenLabsLivePreview.rms(of: [0.5, -0.5, 0.5, -0.5]) == 0.5)
+        #expect(ElevenLabsLivePreview.rms(of: []) == 0)
+    }
+}
