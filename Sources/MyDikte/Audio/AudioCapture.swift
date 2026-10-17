@@ -1,6 +1,7 @@
 import AVFoundation
 import Foundation
 import Synchronization
+import os
 
 /// Owns the microphone: an `AVAudioEngine` input tap, converted to 16 kHz mono Float32 and
 /// spooled to a temp file, plus a per-buffer level for the recording indicator.
@@ -110,6 +111,30 @@ final class AudioCapture: @unchecked Sendable {
         Double(tapBufferSize) / 48_000
     }
 
+    /// How far the recording may trail the wall clock after a configuration change before audio
+    /// counts as lost. The capture normally trails by 10.7 to 71.4 ms
+    /// (`evidence/step-08-cold-start.txt`), so this only trips on a real stall, and is loose enough
+    /// that a Bluetooth link renegotiating its profile is not mistaken for one.
+    static let configurationStallToleranceSeconds: Double = 1.5
+
+    /// Whether a configuration change during the recording cost it audio.
+    ///
+    /// A change alone is not a loss. Opening a Bluetooth headset's microphone moves it from A2DP to
+    /// the hands-free profile and posts the change about 70 ms into every recording, while the engine
+    /// keeps running and AUHAL resamples to the format the tap was installed with: on a UGREEN
+    /// Studio Max2 that is how every dictation used to fail with a whole recording in hand. Audio is
+    /// lost when the engine stopped, which Apple documents for a sample-rate or channel change, or
+    /// when it kept "running" but the recording fell behind the wall clock, which is a device that
+    /// went away without the engine noticing.
+    static func configurationChangeLostAudio(
+        engineWasRunning: Bool,
+        wallClock: TimeInterval,
+        duration: TimeInterval
+    ) -> Bool {
+        !engineWasRunning || wallClock - duration > configurationStallToleranceSeconds
+    }
+
+    private let logger = Logger(subsystem: BundleInfo.bundleIdentifier, category: "AudioCapture")
     private let lock = NSLock()
     private let spool = AudioSpool()
     private let tapState = TapState(rmsCapacity: AudioCapture.rmsCapacity)
@@ -199,6 +224,9 @@ final class AudioCapture: @unchecked Sendable {
         // than enqueue into a spool that is being finished.
         let wasKeeping: Bool = tapState.isKeeping.exchange(false, ordering: .acquiringAndReleasing)
         let stopUptime: UInt64 = DispatchTime.now().uptimeNanoseconds
+        // Read before the teardown stops it: whether the engine was still up is what tells a
+        // Bluetooth profile switch apart from a device change that ended the capture.
+        let engineWasRunning: Bool = engine.isRunning
         tearDown(engine)
         self.engine = nil
 
@@ -215,6 +243,27 @@ final class AudioCapture: @unchecked Sendable {
         let completed: AudioSpool.Completed = try spool.finish()
         let frameCount: Int = completed.byteCount / MemoryLayout<Float>.size
         let duration: TimeInterval = Double(frameCount) / Self.sampleRate
+        let wallClock: TimeInterval = tapState.wallClock(until: stopUptime)
+
+        if tapState.configurationChanged.load(ordering: .acquiring) {
+            let lost: Bool = Self.configurationChangeLostAudio(
+                engineWasRunning: engineWasRunning,
+                wallClock: wallClock,
+                duration: duration
+            )
+            let summary: String = String(
+                format: "running %@, %.2f s recorded against %.2f s wall clock",
+                engineWasRunning ? "yes" : "no",
+                duration,
+                wallClock
+            )
+            logger.notice("audio configuration changed during the recording: \(summary, privacy: .public)")
+            if lost {
+                try FileManager.default.removeItem(at: completed.fileURL)
+                throw Failure.inputConfigurationChanged
+            }
+        }
+
         let chunkRMS: [Double] = tapState.copyRMSValues()
 
         return Recording(
@@ -223,7 +272,7 @@ final class AudioCapture: @unchecked Sendable {
             chunkRMS: chunkRMS,
             chunkSeconds: chunkRMS.isEmpty ? 0 : duration / Double(chunkRMS.count),
             coldStart: tapState.coldStart(),
-            wallClock: tapState.wallClock(until: stopUptime)
+            wallClock: wallClock
         )
     }
 
@@ -347,9 +396,10 @@ final class AudioCapture: @unchecked Sendable {
     }
 
     private func registerConfigurationObserver(for engine: AVAudioEngine) {
-        // Plugging AirPods in mid-recording stops the engine and posts this. Without the flag
-        // the recording would simply end early and be transcribed as if complete, which is the
-        // silent-truncation failure; with it, `stop()` says what happened.
+        // Plugging AirPods in mid-recording stops the engine and posts this, and so does a
+        // Bluetooth headset switching profile as its microphone opens, which loses nothing. The
+        // flag only marks that a change happened; `stop()` decides from the engine's state and the
+        // recorded duration whether it cost audio, so a real truncation still fails loudly.
         configurationObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange,
             object: engine,
@@ -443,9 +493,8 @@ private final class TapState: @unchecked Sendable {
                 seconds: Double(rmsCapacity) * Double(AudioCapture.tapChunkSeconds)
             )
         }
-        if configurationChanged.load(ordering: .acquiring) {
-            return .inputConfigurationChanged
-        }
+        // A configuration change is judged in `stop()` instead, against the finished recording:
+        // most changes cost no audio at all.
         return nil
     }
 
