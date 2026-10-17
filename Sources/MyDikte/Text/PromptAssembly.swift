@@ -22,38 +22,40 @@ enum PromptAssembly {
         let user: String
     }
 
-    /// The framing `GLOSSARY_RULE_TR` uses in `references/dikte/dikte/config.py:190-192`: a
-    /// heading, the term list, and the rule that a similar-sounding word is probably one of
-    /// these. Kept in Turkish regardless of mode because it describes the Turkish transcript
-    /// both modes read, not the language of their own system prompt.
-    private static let glossaryHeading = "KONUŞMACININ KULLANDIĞI İSİM VE TERİMLER"
-    private static let glossaryRule =
-        "Transkriptteki bir kelime bunlardan birine sesçe benziyorsa büyük ihtimalle o kelimedir; "
-        + "yukarıdaki yazımı kullan."
+    /// The framing `GLOSSARY_RULE_TR` uses in `references/dikte/dikte/config.py:190-192`, tightened:
+    /// a similar-sounding word is one of these terms only when it makes no sense as it stands. The
+    /// looser original turned real Turkish words into terms ("komutu" into commit, "dert" into Dart),
+    /// and the paraphrase guard accepts a glossary term without checking it, so nothing caught that.
+    static let glossaryRule =
+        "Terms this speaker added himself. A transcript word that sounds like one of these and makes "
+        + "no sense as it stands is probably this term; a real Turkish word that fits its sentence stays."
 
     /// Assembles the system and user message for `mode`, given the raw or cleaned transcript
     /// and the glossary terms the user configured.
     static func messages(for mode: Mode, transcript: String, glossary: [String] = []) -> Messages {
-        let prompt: String
         switch mode {
         case .cleanup:
-            prompt = CleanupPrompt.systemMessage
+            // The glossary sits between the rules and the closing output rule, so the output rule is
+            // still the last thing in the system prompt, and the user turn ends on a reminder.
+            return Messages(
+                system: CleanupPrompt.body + glossaryBlock(for: glossary) + "\n\n" + CleanupPrompt.closing,
+                user: fence(transcript) + "\n\n" + CleanupPrompt.reminder
+            )
         case .promptRewrite:
-            prompt = PromptRewritePrompt.systemMessage
+            return Messages(
+                system: PromptRewritePrompt.systemMessage + glossaryBlock(for: glossary),
+                user: fence(transcript)
+            )
         }
-        return Messages(
-            system: prompt + glossaryBlock(for: glossary),
-            user: fence(transcript)
-        )
     }
 
-    /// Empty when there is nothing to say; otherwise the heading, the terms, and the rule.
+    /// Empty when there is nothing to say; otherwise the rule and the terms, tagged.
     private static func glossaryBlock(for terms: [String]) -> String {
         guard !terms.isEmpty else {
             return ""
         }
         let list = terms.map { "- \($0)" }.joined(separator: "\n")
-        return "\n\n\(glossaryHeading)\n\(list)\n\(glossaryRule)"
+        return "\n\n<glossary>\n\(glossaryRule)\n\(list)\n</glossary>"
     }
 
     /// Wraps `transcript` in a nonce-tagged `<TRANSCRIPT>` fence.
