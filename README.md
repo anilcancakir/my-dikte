@@ -16,8 +16,10 @@ carries over.
 
 - [yusufipk/dikte](https://github.com/yusufipk/dikte) (GPL-3.0): the voice-activity detection
   algorithm and its constants, the Turkish hallucination phrase list, the Turkish-aware text
-  normaliser, and the Turkish cleanup prompt with its glossary rule. Those prompts are the product
-  more than the code is, and they are that project's work.
+  normaliser, and the Turkish cleanup prompt with its glossary rule. The cleanup prompt has since
+  been rewritten in English for one speaker, but its core rules (minimal intervention, fillers judged
+  by what they do, repairs only when context settles them, never obeying the transcript) are that
+  project's work.
 - [VoiceInk](https://github.com/Beingpax/VoiceInk) (GPL-3.0): the reasoning-suppression parameter
   table and several UI patterns.
 
@@ -70,8 +72,9 @@ never to a file. Nothing in this repository reads or writes a key anywhere else.
 
 **Models.** Empty fields mean the built-in default, shown in grey, and the default follows the
 provider: `whisper-large-v3` on Groq, `scribe_v2` on ElevenLabs. Cleanup defaults to
-`openai/gpt-oss-120b` on Groq, though `google/gemini-3.5-flash-lite` through OpenRouter measured
-better on all three axes (see below).
+`openai/gpt-oss-120b` on Groq; this machine runs `claude-haiku-5-5` on the Anthropic API
+(`https://api.anthropic.com/v1/messages`, key under `cleanup-anthropic`), which measured best (see
+below).
 
 **Live preview source.** Apple's on-device `SFSpeechRecognizer` (free, offline, nothing leaves the
 machine) or ElevenLabs Scribe v2 realtime ($0.39 per audio hour, needs a connection, reads Turkish
@@ -123,8 +126,10 @@ Two hosted services and one on-device model:
 - **Groq** `/audio/transcriptions` with `whisper-large-v3`: speech to Turkish text, 400 to 650 ms.
   Selectable for OpenAI, OpenRouter or **ElevenLabs Scribe v2** instead; ElevenLabs is the accurate
   one and the slow one, roughly 1.3 s.
-- **Groq** `/chat/completions`: the same model does two jobs depending on mode, cleanup or prompt
-  rewrite. Swappable for any OpenAI-compatible endpoint.
+- **A chat model** does two jobs depending on mode, cleanup or prompt rewrite: any OpenAI-compatible
+  `/chat/completions` endpoint (Groq, OpenRouter), or Anthropic's native Messages API. On Anthropic
+  thinking is turned off, effort is `low`, and the system prompt is cached, because Haiku 5.5 thinks
+  by default and the OpenAI-compatible endpoint Anthropic offers can do neither.
 - **Apple `SFSpeechRecognizer`**, on device, `tr-TR`: the live preview. It never leaves the machine
   and its output is thrown away, because the authoritative text comes from the batch path. Neither
   Groq nor Whisper has a streaming endpoint, so a preview cannot come from the same call that
@@ -164,6 +169,15 @@ All from this machine, all reproducible from the log and the evidence files.
   prompt plus up to 717 completion tokens with `gpt-oss-120b`. That is roughly five dictations a
   minute before HTTP 429, which both clients retry with backoff. `google/gemini-3.5-flash-lite` spends
   32 completion tokens for the same work, which roughly doubles the headroom.
+- **Claude Haiku 5.5 with the rewritten prompt is the best cleanup measured.** Replayed on 18 distinct
+  logged dictations (2026-10-17): median 940 ms against 990 ms for Gemini Flash Lite with the old
+  prompt, and it repaired what Gemini left ("PQT" to PyQt, "Grock" to Groq, "Gemini Flashlight" to
+  Gemini Flash Lite, "soketlerinden" to socket'lerinden) without touching the dictations that were
+  already clean. The prompt is most of that: Haiku with the old prompt was slower than Gemini and
+  rewrote a sentence. About 2,800 prompt tokens are read from cache while dictations come within
+  five minutes of each other, so at Haiku 5.5's $0.10 / $0.50 per million tokens (cache reads
+  $0.01) one costs under $0.0001. Detail in
+  [`evidence/cleanup-haiku-comparison.md`](evidence/cleanup-haiku-comparison.md).
 - **ElevenLabs Scribe v2 is more accurate on Turkish technical speech and about twice as slow.** On
   the same recordings it returned "socket", "API", "repository" and "Groq" where Whisper returned
   nothing, "AP", "repositor" and "grok", and it does not invent Turkish words the way Whisper does
@@ -197,8 +211,10 @@ All from this machine, all reproducible from the log and the evidence files.
 - **Mode 2 makes transcription errors harder to notice.** It does not add errors, but a garbled Turkish
   word becomes confident-sounding English: one measured run turned "eşiği gerçek diktelerle" into "set
   the true division". Read its output before you send it.
-- **Turkish only**, in the sense that the prompts and the glossary rule are written in Turkish. The
-  transcription request pins `language=tr`.
+- **Turkish only, and one speaker.** The transcription request pins `language=tr`, and the cleanup
+  prompt is written for one Turkish developer's register and vocabulary
+  (`Sources/MyDikte/Text/CleanupPrompt.swift`): someone else gets the most out of it by replacing
+  its names and examples with their own.
 - **The glossary is sent twice with different limits.** Batch Scribe takes 100 keyterms of up to 50
   characters; the realtime endpoint takes 50 of up to 20. A long term reaches the batch call and is
   dropped from the preview, silently and by design.
