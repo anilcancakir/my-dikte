@@ -7,10 +7,9 @@ import os
 ///
 /// It resolves two things `Settings` leaves open. An empty model id means "not configured", not
 /// "send an empty model", so it falls back to the two models this plan actually measured. And the
-/// chat endpoint has exactly two supported providers with exactly one Keychain account each
-/// (`cleanup-groq`, `cleanup-openrouter`), so an endpoint that is still on `Settings`' untouched
-/// default (`api.openai.com`, written before the plan's Wave 1 amendment moved cleanup to Groq)
-/// resolves to Groq rather than authenticating against a key that cannot exist.
+/// chat endpoint has one Keychain account per supported provider (`cleanup-groq`,
+/// `cleanup-openrouter`, `cleanup-anthropic`), so an endpoint that is still on `Settings`' untouched
+/// default resolves to Groq rather than authenticating against a key that cannot exist.
 struct PipelineConfiguration: Sendable, Equatable {
     /// Measured on this machine at 0.38 to 0.66 s warm, and the more accurate model on Turkish
     /// (`evidence/step-02-groq-seam.txt`).
@@ -130,7 +129,10 @@ struct PipelineConfiguration: Sendable, Equatable {
     /// endpoints never reads the other provider's key, which would fail with an authentication
     /// error that says nothing about the real cause.
     static func chatKeychainAccount(forEndpoint endpoint: String) -> String {
-        endpoint.contains("openrouter.ai") ? "cleanup-openrouter" : "cleanup-groq"
+        if ChatClient.host(forEndpoint: endpoint) == ChatClient.anthropicHost {
+            return "cleanup-anthropic"
+        }
+        return endpoint.contains("openrouter.ai") ? "cleanup-openrouter" : "cleanup-groq"
     }
 
     /// Sized to the input rather than left open: an unbounded reply budget on a reasoning-capable

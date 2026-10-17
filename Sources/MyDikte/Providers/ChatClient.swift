@@ -3,6 +3,12 @@ import Foundation
 /// Posts the cleanup and prompt-rewrite requests Step 5's `PromptAssembly` builds to a
 /// chat-completions endpoint, and returns the model's reply text.
 ///
+/// Two wire formats. Every OpenAI-compatible endpoint (Groq, OpenRouter) takes `/chat/completions`.
+/// `api.anthropic.com` takes the native Messages API instead, because Anthropic documents its
+/// OpenAI-compatible endpoint as a testing aid that ignores `reasoning_effort` and offers no prompt
+/// caching, and Haiku 5.5 thinks by default: turning thinking off and caching the system prompt
+/// are what keep a cleanup under a second.
+///
 /// This duplicates the retry, error and cancellation shape of the transcription client
 /// (`references/VoiceInk/VoiceInk/Services/AIEnhancement/AIEnhancementService.swift:403-476` for
 /// the backoff loop) rather than sharing code with it: two callers is not the three concrete
@@ -26,6 +32,9 @@ struct ChatClient {
         case decodingError(underlying: Error)
         /// The response decoded but carried no message content to return.
         case emptyResponse
+        /// The model stopped before finishing: cut off at `max_tokens`, or refused. Not pasted, because
+        /// the raw transcript is better than half a cleanup or a refusal message at the caret.
+        case incompleteReply(stopReason: String)
 
         var errorDescription: String? {
             switch self {
@@ -41,6 +50,8 @@ struct ChatClient {
                 return "Could not decode the cleanup endpoint's response: \(underlying.localizedDescription)"
             case .emptyResponse:
                 return "The cleanup endpoint returned no message content."
+            case .incompleteReply(let stopReason):
+                return "The cleanup model stopped before finishing (\(stopReason))."
             }
         }
     }
@@ -121,7 +132,7 @@ struct ChatClient {
     /// - Parameters:
     ///   - endpoint: the configured chat-completions URL, `Settings.cleanupEndpoint` by default.
     ///   - apiKeyAccount: the `KeychainStore` account the configured endpoint's key lives under,
-    ///     `cleanup-groq` for Groq or `cleanup-openrouter` for OpenRouter.
+    ///     `cleanup-groq`, `cleanup-openrouter` or `cleanup-anthropic`.
     ///   - modelId: the fully namespaced model id to send, and to look up in
     ///     `ReasoningSuppression`.
     ///   - session: injected for testability; defaults to `.shared`.
@@ -189,7 +200,7 @@ struct ChatClient {
             return true
         case .serverError(let statusCode, _):
             return statusCode == 429 || (500...599).contains(statusCode)
-        case .missingAPIKey, .invalidEndpoint, .decodingError, .emptyResponse:
+        case .missingAPIKey, .invalidEndpoint, .decodingError, .emptyResponse, .incompleteReply:
             return false
         }
     }
@@ -201,30 +212,24 @@ struct ChatClient {
         }
 
         let apiKey = try requireAPIKey()
-        let suppression = ReasoningSuppression.parameters(for: modelId)
-
-        let body = RequestBody(
-            model: modelId,
-            messages: [
-                RequestBody.Message(role: "system", content: messages.system),
-                RequestBody.Message(role: "user", content: messages.user),
-            ],
-            temperature: 0.3,
-            maxTokens: maxTokens,
-            reasoningEffort: suppression?.reasoningEffort,
-            extraBodyParameters: suppression?.extraBodyParameters ?? [:]
-        )
+        let isAnthropic: Bool = Self.isAnthropicEndpoint(endpoint)
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        if isOpenRouterEndpoint {
-            // OpenRouter attributes traffic by these headers; Groq does not want them.
-            request.setValue("https://github.com/anilcan/my-dikte", forHTTPHeaderField: "HTTP-Referer")
-            request.setValue("MyDikte", forHTTPHeaderField: "X-Title")
+        if isAnthropic {
+            request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+            request.setValue(Self.anthropicVersion, forHTTPHeaderField: "anthropic-version")
+            request.httpBody = try Self.anthropicRequestBody(modelId: modelId, messages: messages, maxTokens: maxTokens)
+        } else {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            if isOpenRouterEndpoint {
+                // OpenRouter attributes traffic by these headers; Groq does not want them.
+                request.setValue("https://github.com/anilcan/my-dikte", forHTTPHeaderField: "HTTP-Referer")
+                request.setValue("MyDikte", forHTTPHeaderField: "X-Title")
+            }
+            request.httpBody = try chatCompletionsBody(messages: messages, maxTokens: maxTokens)
         }
-        request.httpBody = try JSONEncoder().encode(body)
 
         let data: Data
         let response: URLResponse
@@ -244,6 +249,27 @@ struct ChatClient {
             throw ChatClientError.serverError(statusCode: httpResponse.statusCode, body: bodyText)
         }
 
+        return isAnthropic ? try Self.anthropicReplyText(from: data) : try Self.chatCompletionsReplyText(from: data)
+    }
+
+    /// The `/chat/completions` body, with whatever `ReasoningSuppression` contributes for the model.
+    private func chatCompletionsBody(messages: PromptAssembly.Messages, maxTokens: Int) throws -> Data {
+        let suppression = ReasoningSuppression.parameters(for: modelId)
+        let body = RequestBody(
+            model: modelId,
+            messages: [
+                RequestBody.Message(role: "system", content: messages.system),
+                RequestBody.Message(role: "user", content: messages.user),
+            ],
+            temperature: 0.3,
+            maxTokens: maxTokens,
+            reasoningEffort: suppression?.reasoningEffort,
+            extraBodyParameters: suppression?.extraBodyParameters ?? [:]
+        )
+        return try JSONEncoder().encode(body)
+    }
+
+    private static func chatCompletionsReplyText(from data: Data) throws -> String {
         let decoded: ResponseBody
         do {
             decoded = try JSONDecoder().decode(ResponseBody.self, from: data)
@@ -269,6 +295,136 @@ struct ChatClient {
             return value
         case .missing, .unavailable:
             throw ChatClientError.missingAPIKey(account: apiKeyAccount)
+        }
+    }
+}
+
+// MARK: - Anthropic Messages
+
+extension ChatClient {
+    /// The Messages API version header every request carries.
+    static let anthropicVersion = "2023-06-01"
+
+    static let anthropicHost = "api.anthropic.com"
+
+    /// Whether `endpoint` is Anthropic's Messages URL. The host alone is not enough: Anthropic also
+    /// serves an OpenAI-compatible `/v1/chat/completions`, which takes the other body.
+    static func isAnthropicEndpoint(_ endpoint: String) -> Bool {
+        guard let components = URLComponents(string: endpoint) else {
+            return false
+        }
+        return components.host == anthropicHost && components.path == "/v1/messages"
+    }
+
+    /// The Messages request body.
+    ///
+    /// - `system` is one block marked `ephemeral`, so the prompt and glossary, which change only
+    ///   when the user edits them, are read from cache while dictations come within the cache's
+    ///   five-minute lifetime of each other; measured on 2026-10-17 as 2,801 tokens read from cache.
+    /// - Thinking is disabled and effort is `low`: a cleanup is a constrained rewrite, and Haiku
+    ///   5.5's default adaptive thinking would spend the latency the whole call is budgeted for.
+    ///   Anthropic accepts `disabled` on Haiku 5.5 at `high` effort or below.
+    /// - No `temperature`: Haiku 5.5 rejects any value but its default.
+    static func anthropicRequestBody(
+        modelId: String,
+        messages: PromptAssembly.Messages,
+        maxTokens: Int
+    ) throws -> Data {
+        let body = AnthropicRequestBody(
+            model: modelId,
+            maxTokens: maxTokens,
+            system: [
+                .init(type: "text", text: messages.system, cacheControl: .init(type: "ephemeral")),
+            ],
+            messages: [
+                .init(role: "user", content: messages.user),
+            ],
+            thinking: .init(type: "disabled"),
+            outputConfig: .init(effort: "low")
+        )
+        return try JSONEncoder().encode(body)
+    }
+
+    /// The text of the first `text` block. Haiku 5.5 can put a thinking block first even with
+    /// nothing in it, so `content[0]` is not the reply. A reply that stopped at `max_tokens` or in
+    /// a refusal throws instead, whatever text it carries.
+    static func anthropicReplyText(from data: Data) throws -> String {
+        let decoded: AnthropicResponseBody
+        do {
+            decoded = try JSONDecoder().decode(AnthropicResponseBody.self, from: data)
+        } catch {
+            throw ChatClientError.decodingError(underlying: error)
+        }
+        if let stopReason = decoded.stopReason, ["max_tokens", "refusal"].contains(stopReason) {
+            throw ChatClientError.incompleteReply(stopReason: stopReason)
+        }
+
+        guard let text = decoded.content.first(where: { $0.type == "text" })?.text, !text.isEmpty else {
+            throw ChatClientError.emptyResponse
+        }
+        return text
+    }
+
+    private struct AnthropicRequestBody: Encodable {
+        struct SystemBlock: Encodable {
+            struct CacheControl: Encodable {
+                let type: String
+            }
+
+            let type: String
+            let text: String
+            let cacheControl: CacheControl
+
+            enum CodingKeys: String, CodingKey {
+                case type
+                case text
+                case cacheControl = "cache_control"
+            }
+        }
+
+        struct Message: Encodable {
+            let role: String
+            let content: String
+        }
+
+        struct Thinking: Encodable {
+            let type: String
+        }
+
+        struct OutputConfig: Encodable {
+            let effort: String
+        }
+
+        let model: String
+        let maxTokens: Int
+        let system: [SystemBlock]
+        let messages: [Message]
+        let thinking: Thinking
+        let outputConfig: OutputConfig
+
+        enum CodingKeys: String, CodingKey {
+            case model
+            case maxTokens = "max_tokens"
+            case system
+            case messages
+            case thinking
+            case outputConfig = "output_config"
+        }
+    }
+
+    /// The subset of a Messages response this client reads.
+    private struct AnthropicResponseBody: Decodable {
+        struct Block: Decodable {
+            let type: String
+            let text: String?
+        }
+
+        let content: [Block]
+        let stopReason: String?
+
+        enum CodingKeys: String, CodingKey {
+            case content
+            case stopReason = "stop_reason"
         }
     }
 }
@@ -308,8 +464,9 @@ extension ChatClient {
     /// host and port, so warming any other origin would leave the real POST to open its own connection
     /// and the handshake would be wasted.
     ///
-    /// `HEAD` because a handshake is the whole point. Both supported endpoints answer a HEAD with 404,
-    /// which is a completed TLS handshake, no API key, no body and no completion: a real cleanup request
+    /// `HEAD` because a handshake is the whole point. Groq and OpenRouter answer a HEAD with 404 and
+    /// Anthropic's Messages URL with 405 (measured 2026-10-17), each a completed TLS handshake with no
+    /// API key, no body and no completion: a real cleanup request
     /// here would cost tokens against a rate limit the user is already close to and would put a reply
     /// nowhere useful.
     static func prewarmRequest(forEndpoint endpoint: String) -> URLRequest? {

@@ -472,6 +472,10 @@ struct PipelineConfigurationTests {
             PipelineConfiguration.chatKeychainAccount(forEndpoint: "https://openrouter.ai/api/v1/chat/completions")
                 == "cleanup-openrouter"
         )
+        #expect(
+            PipelineConfiguration.chatKeychainAccount(forEndpoint: "https://api.anthropic.com/v1/messages")
+                == "cleanup-anthropic"
+        )
     }
 
     @Test("the reply budget is sized to the transcript rather than left open")
