@@ -108,6 +108,11 @@ public enum ParaphraseGuard {
     ///     form such as "Redis'in" already satisfies a "Redis" entry; no Turkish
     ///     normalisation is applied, since glossary entries are identifiers that
     ///     appear the same way in both strings.
+    ///   - repairTargets: names the cleanup prompt itself asks the model to repair misheard words
+    ///     into. Accepted only as introduced words, and only when the cleaned word is the name or the
+    ///     name with a suffix. Kept apart from `glossary` on purpose: glossary matching is a substring
+    ///     test in both directions, which for stems as short as "pr" or "son" (Sonnet) would license
+    ///     "problem" for "sorun", and a dropped caption containing "ci" would read as a dropped term.
     ///   - wordCountTolerance: the fraction of `raw`'s word count that `cleaned`
     ///     may drift by in either direction before it is treated as a rewrite
     ///     rather than a cleanup.
@@ -117,6 +122,7 @@ public enum ParaphraseGuard {
         raw: String,
         cleaned: String,
         glossary: [String],
+        repairTargets: [String] = [],
         wordCountTolerance: Double = 1.0 / 3.0
     ) -> Result {
         let trimmedRaw = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -164,7 +170,12 @@ public enum ParaphraseGuard {
         //    check that catches a same-length, same-position substitution, which checks 2 and 3
         //    cannot see by construction: the measured failure was Turkish "yine" becoming English
         //    "again" with the word count and every glossary term intact.
-        if let introduced = introducedWord(raw: trimmedRaw, cleaned: trimmedCleaned, glossary: glossary) {
+        if let introduced = introducedWord(
+            raw: trimmedRaw,
+            cleaned: trimmedCleaned,
+            glossary: glossary,
+            repairTargets: repairTargets
+        ) {
             return .concern(
                 Concern(
                     kind: .introducedWord,
@@ -196,9 +207,15 @@ public enum ParaphraseGuard {
     /// postposition the repair separated out, so the guard rejected the single measured accuracy win
     /// the glossary exists for, every time. Full matrix in
     /// `.ac/plans/my-dikte-swift-macos/evidence/step-06-guard-live-matrix.txt`.
-    private static func introducedWord(raw: String, cleaned: String, glossary: [String]) -> String? {
+    private static func introducedWord(
+        raw: String,
+        cleaned: String,
+        glossary: [String],
+        repairTargets: [String]
+    ) -> String? {
         let rawStems: [String] = stems(of: raw)
         let glossaryStems: [String] = glossary.flatMap { stems(of: $0) }
+        let targetStems: [String] = repairTargets.flatMap { stems(of: $0) }
 
         for word in stems(of: cleaned) {
             // Too short to carry a paraphrase, and short strings match everything by accident.
@@ -209,6 +226,11 @@ public enum ParaphraseGuard {
                 continue
             }
             if glossaryStems.contains(where: { $0.contains(word) || word.contains($0) }) {
+                continue
+            }
+            // The name itself, or the name with a Turkish suffix ("kodizm" in "kodizmde"). A short
+            // acronym only ever matches itself: as a prefix, "cli" would license "client".
+            if targetStems.contains(where: { isRepair(word, of: $0) }) {
                 continue
             }
             if rawStems.contains(where: { $0.contains(word) || word.contains($0) }) {
@@ -386,6 +408,15 @@ public enum ParaphraseGuard {
     /// Words shorter than this are exempt from the introduced-word check: they carry too little
     /// meaning to be a paraphrase and they collide with longer words by chance.
     private static let minimumComparableLength: Int = 3
+
+    /// Whether `word` is `target`, or `target` with a suffix when the target is long enough for that.
+    private static func isRepair(_ word: String, of target: String) -> Bool {
+        word == target || (target.count >= minimumRepairPrefixLength && word.hasPrefix(target))
+    }
+
+    /// The shortest repair target that may match as the start of a longer word. Below it are the
+    /// acronyms (API, CLI, MCP, LLM), which open too many ordinary words.
+    private static let minimumRepairPrefixLength: Int = 4
 
     private static func wordCount(of text: String) -> Int {
         text.split(whereSeparator: { $0.isWhitespace }).count

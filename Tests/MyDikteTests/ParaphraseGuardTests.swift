@@ -455,3 +455,60 @@ struct ParaphraseGuardTests {
         }
     }
 }
+
+/// The cleanup prompt's own vocabulary, passed as repair targets rather than as glossary.
+///
+/// The regression it guards: those names were first appended to the glossary, whose matching is a
+/// substring test in both directions, so a stem as short as "pr" or "son" (from Sonnet) licensed
+/// "problem" for "sorun" and every other swap the introduced-word check exists to catch.
+@Suite("ParaphraseGuard repair targets")
+struct ParaphraseGuardRepairTargetTests {
+    @Test("a repair to one of the prompt's names is accepted")
+    func repairToANameIsAccepted() {
+        let result = ParaphraseGuard.check(
+            raw: "Grock'un limitini yakmadan kodistim tarafını dene.",
+            cleaned: "Groq'un limitini yakmadan kodizm tarafını dene.",
+            glossary: [],
+            repairTargets: CleanupPrompt.names
+        )
+
+        #expect(result == .accept)
+    }
+
+    @Test(
+        "a synonym or translation is still caught with every name passed as a repair target",
+        arguments: [
+            ("bu sorun neden çıkıyor", "bu problem neden çıkıyor"),
+            ("ilerleme durumunu yaz", "progress durumunu yaz"),
+            ("istemci tarafına bak", "client tarafına bak"),
+        ]
+    )
+    func substitutionIsStillCaught(raw: String, cleaned: String) {
+        let result = ParaphraseGuard.check(
+            raw: raw,
+            cleaned: cleaned,
+            glossary: [],
+            repairTargets: CleanupPrompt.names
+        )
+
+        guard case .concern(let concern) = result else {
+            Issue.record("expected .concern, got \(result)")
+            return
+        }
+        #expect(concern.kind == .introducedWord)
+    }
+
+    @Test("a dropped caption is never reported as a dropped name")
+    func droppedCaptionIsNotADroppedName() {
+        let result = ParaphraseGuard.check(
+            raw: "İzlediğiniz için teşekkürler. Bunu commit edip deploy edelim.",
+            cleaned: "Bunu commit edip deploy edelim.",
+            glossary: [],
+            repairTargets: CleanupPrompt.names
+        )
+
+        if case .concern(let concern) = result {
+            #expect(concern.kind != .droppedGlossaryTerm)
+        }
+    }
+}

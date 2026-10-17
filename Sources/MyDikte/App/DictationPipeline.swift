@@ -229,7 +229,10 @@ enum InsertionChoice: Sendable, Equatable {
                 case .concern(let concern) = ParaphraseGuard.check(
                     raw: raw,
                     cleaned: cleaned,
-                    glossary: glossary
+                    glossary: glossary,
+                    // A repair to one of the prompt's own names is the prompt doing its job, not a
+                    // word the model introduced.
+                    repairTargets: CleanupPrompt.names
                 )
             else {
                 return .cleaned(text: cleaned, concern: nil)
