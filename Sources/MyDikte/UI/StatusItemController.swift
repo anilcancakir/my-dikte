@@ -49,6 +49,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private var accessibilityWarningItem: NSMenuItem?
     private var startStopItem: NSMenuItem?
     private var cancelItem: NSMenuItem?
+    private var remoteItem: NSMenuItem?
     private var launchAtLoginItem: NSMenuItem?
     private var quitItem: NSMenuItem?
 
@@ -82,6 +83,23 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     /// directly today; it exists so the seam is exercised from the Debug menu until Step 17 lands.
     func setState(_ newState: State) {
         state = newState
+    }
+
+    /// Reflects the link to the work Mac in the menu. A menu item has no other way to be read from
+    /// outside, so the title is the whole display.
+    func setRemoteState(_ newState: RemoteLink.State) {
+        remoteItem?.title = Self.remoteTitle(for: newState)
+    }
+
+    private static func remoteTitle(for state: RemoteLink.State) -> String {
+        switch state {
+        case .off:
+            return "Remote: off"
+        case .connected:
+            return "Remote: connected"
+        case .reconnecting:
+            return "Remote: reconnecting"
+        }
     }
 
     /// Inserts `item` (with a leading separator) directly before Quit, or appends it if Quit
@@ -128,6 +146,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         cancel.target = self
         cancelItem = cancel
         menu.addItem(cancel)
+
+        let remote = NSMenuItem(title: Self.remoteTitle(for: .off), action: nil, keyEquivalent: "")
+        remote.isEnabled = false
+        remoteItem = remote
+        menu.addItem(remote)
 
         menu.addItem(.separator())
 

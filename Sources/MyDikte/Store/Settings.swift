@@ -174,6 +174,10 @@ struct Settings: Codable, Equatable {
     /// and the same secure-input limitation, and a user who does not want bare keys acting on a
     /// recording does not want one of the three either.
     var stopOnReturnOrSpace: Bool
+    /// The ssh host (an alias from `~/.ssh/config` or a name) of the Mac whose shortcuts trigger a
+    /// dictation here. Empty keeps the remote link off, which is why it is not a separate toggle.
+    /// Set by editing `settings.json`, and read once at launch like the shortcut layer.
+    var remoteHost: String
 
     static let `default` = Settings(
         pushToTalkChord: .unset,
@@ -194,13 +198,14 @@ struct Settings: Codable, Equatable {
         livePreviewProvider: .apple,
         batchVerification: false,
         advisoryParaphraseGuard: true,
-        stopOnReturnOrSpace: true
+        stopOnReturnOrSpace: true,
+        remoteHost: ""
     )
 }
 
 extension Settings {
     /// Decodes every field strictly except `advisoryParaphraseGuard`, `stopOnReturnOrSpace`,
-    /// `livePreviewProvider` and `batchVerification`, which fall back to their defaults when the file
+    /// `livePreviewProvider`, `batchVerification` and `remoteHost`, which fall back to their defaults when the file
     /// does not carry them.
     ///
     /// The general rule for this file stands: a file that will not decode is replaced by defaults,
@@ -238,6 +243,8 @@ extension Settings {
             ?? Settings.default.advisoryParaphraseGuard
         stopOnReturnOrSpace = try container.decodeIfPresent(Bool.self, forKey: .stopOnReturnOrSpace)
             ?? Settings.default.stopOnReturnOrSpace
+        remoteHost = try container.decodeIfPresent(String.self, forKey: .remoteHost)
+            ?? Settings.default.remoteHost
     }
 }
 

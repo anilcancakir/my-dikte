@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pipeline: DictationPipeline?
     private var shortcuts: ShortcutCoordinator?
     private var permissionGate: PermissionGate?
+    private var remoteLink: RemoteLink?
     private let logger = Logger(subsystem: BundleInfo.bundleIdentifier, category: "AppDelegate")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -31,7 +32,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         registerDebugEntries()
         setUpStatusItem()
         setUpShortcuts()
+        setUpRemoteLink()
         requestSpeechRecognitionIfEnabled()
+    }
+
+    /// The ssh child would otherwise outlive the app until its own keep-alive noticed, and in that
+    /// window the work Mac's shortcuts would still look connected.
+    func applicationWillTerminate(_ notification: Notification) {
+        remoteLink?.stop()
     }
 
     /// Asks for the Speech Recognition grant the live preview needs, at launch rather than during a
@@ -104,14 +112,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.installDebugMenuItem(DebugMenu.buildMenuItem())
         statusItemController = controller
 
-        pipeline?.onStageChange = { [weak controller] stage in
+        // `remoteLink` is read when the closure runs, not captured: it is built after this method, and
+        // these two closures stay the only owners of the pipeline's stage and failure callbacks.
+        pipeline?.onStageChange = { [weak self, weak controller] stage in
             controller?.setState(Self.statusState(for: stage))
+            self?.remoteLink?.pipelineStageChanged(stage)
         }
-        pipeline?.onFailure = { [weak controller] _ in
+        pipeline?.onFailure = { [weak self, weak controller] message in
             // The message itself is carried by the indicator panel and the log; the status item
             // only has an icon, so it shows that something went wrong and nothing more. No alert:
             // a modal here would steal the focus the dictation just went to.
             controller?.setState(.error)
+            self?.remoteLink?.pipelineFailed(message: message)
         }
     }
 
@@ -154,6 +166,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             coordinator?.setLatchedRecording(isInFlight)
         }
         startShortcuts()
+    }
+
+    /// Starts the link to the work Mac when `remoteHost` names one. Read once at launch, like the
+    /// shortcut layer, and with no host nothing is created, so no ssh child exists.
+    ///
+    /// The hello carries this Mac's own bindings so the work Mac registers whatever is configured
+    /// here, and a rebinding in `settings.json` needs no matching edit there.
+    private func setUpRemoteLink() {
+        let settings: Settings = .load()
+        guard !settings.remoteHost.isEmpty, let pipeline else {
+            logger.notice("no remote host in settings, so the remote link is off")
+            return
+        }
+
+        let configuration: ShortcutCoordinator.Configuration = ShortcutBinding.configuration(from: settings)
+        let link = RemoteLink(
+            host: settings.remoteHost,
+            shortcuts: RemoteShortcuts(
+                toggle: configuration.toggle,
+                promptToggle: configuration.promptToggle,
+                cancel: configuration.cancel
+            ),
+            pipeline: pipeline
+        )
+        link.onStateChange = { [weak self] state in
+            self?.statusItemController?.setRemoteState(state)
+        }
+        pipeline.onRemoteResult = { [weak link] text in
+            link?.pipelineProducedResult(text)
+        }
+        remoteLink = link
+        statusItemController?.setRemoteState(link.state)
+        link.start()
     }
 
     /// What the coordinator was actually handed, so hands-on QA can read from the log whether a

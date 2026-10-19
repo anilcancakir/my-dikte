@@ -60,7 +60,8 @@ struct SettingsPersistenceTests {
             livePreviewProvider: .elevenLabs,
             batchVerification: true,
             advisoryParaphraseGuard: false,
-            stopOnReturnOrSpace: false
+            stopOnReturnOrSpace: false,
+            remoteHost: "home-mac"
         )
 
         let data = try JSONEncoder().encode(settings)
@@ -75,6 +76,33 @@ struct SettingsPersistenceTests {
         #expect(decoded.advisoryParaphraseGuard == false)
         #expect(decoded.stopOnReturnOrSpace == false)
         #expect(decoded.promptToggleShortcut == settings.promptToggleShortcut)
+        #expect(decoded.remoteHost == "home-mac")
+    }
+
+    /// An empty host is what keeps the remote link off, so a file written before the field existed
+    /// must come back with the link off rather than as a corrupt file that resets everything.
+    @Test("a settings file without remoteHost keeps its glossary and decodes the host to empty")
+    func olderSettingsFileHasNoRemoteHost() throws {
+        let directory: URL = Self.makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let olderFile = """
+            {"pushToTalkChord":{"modifierKeys":[]},"toggleShortcut":{"modifierKeys":[]},\
+            "cancelShortcut":{"modifierKeys":[]},"promptToggleShortcut":{"modifierKeys":[]},\
+            "glossaryTerms":["Kubernetes"],\
+            "transcriptionProvider":"groq","transcriptionModelId":"","cleanupModelId":"",\
+            "cleanupEndpoint":"","rewriteEndpoint":"","autoInsert":true,"historyLimit":50,\
+            "retainAudio":true,"audioCuesEnabled":true,"livePreviewEnabled":true,\
+            "livePreviewProvider":"apple","batchVerification":false,\
+            "advisoryParaphraseGuard":true,"stopOnReturnOrSpace":true}
+            """
+        try Data(olderFile.utf8).write(to: Settings.fileURL(in: directory))
+
+        let loaded = Settings.load(from: directory)
+        #expect(loaded.remoteHost == "")
+        #expect(loaded.glossaryTerms == ["Kubernetes"])
+        #expect(Settings.default.remoteHost == "")
     }
 
     /// On unless it is turned off: reaching back for a two-modifier chord to stop a recording is the
