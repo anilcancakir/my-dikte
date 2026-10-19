@@ -1,4 +1,5 @@
 import AppKit
+import MyDikteKit
 
 /// The application menu bar, which this app went without until it turned out that going without one
 /// breaks text editing.

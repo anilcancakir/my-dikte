@@ -2,6 +2,7 @@ import Foundation
 import Testing
 
 @testable import MyDikte
+@testable import MyDikteKit
 
 @Suite("BundleInfo")
 struct BundleInfoTests {

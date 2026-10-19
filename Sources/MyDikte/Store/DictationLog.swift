@@ -1,4 +1,5 @@
 import Foundation
+import MyDikteKit
 
 /// A single dictation, one line of `~/Library/Application Support/MyDikte/log.jsonl`. Every field
 /// exists because two deferred decisions read this file instead of the app: choosing the cleanup

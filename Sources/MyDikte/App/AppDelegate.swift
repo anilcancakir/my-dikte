@@ -1,5 +1,6 @@
 import AVFoundation
 import AppKit
+import MyDikteKit
 import os
 
 /// Owns the status item and its menu. Every AppKit lifecycle callback lands here on the main

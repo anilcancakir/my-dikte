@@ -1,5 +1,6 @@
 import AVFoundation
 import AppKit
+import MyDikteKit
 import Synchronization
 import os
 

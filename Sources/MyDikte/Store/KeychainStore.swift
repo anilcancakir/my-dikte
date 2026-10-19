@@ -1,4 +1,5 @@
 import Foundation
+import MyDikteKit
 import Security
 
 /// A minimal wrapper over `SecItemAdd`, `SecItemCopyMatching`, `SecItemUpdate` and `SecItemDelete`

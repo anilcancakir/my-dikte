@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import MyDikteKit
 import Speech
 import Synchronization
 import os

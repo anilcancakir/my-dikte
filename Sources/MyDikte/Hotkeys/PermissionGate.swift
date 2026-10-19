@@ -1,6 +1,7 @@
 import ApplicationServices
 import Carbon.HIToolbox
 import Foundation
+import MyDikteKit
 import Speech
 import os
 

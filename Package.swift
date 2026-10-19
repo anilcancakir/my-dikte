@@ -12,8 +12,13 @@ let package = Package(
     ],
     dependencies: [],
     targets: [
+        .target(
+            name: "MyDikteKit",
+            path: "Sources/MyDikteKit"
+        ),
         .executableTarget(
             name: "MyDikte",
+            dependencies: ["MyDikteKit"],
             path: "Sources/MyDikte"
         ),
         .executableTarget(
@@ -22,7 +27,7 @@ let package = Package(
         ),
         .testTarget(
             name: "MyDikteTests",
-            dependencies: ["MyDikte"],
+            dependencies: ["MyDikte", "MyDikteKit"],
             path: "Tests/MyDikteTests"
         ),
     ]

@@ -1,6 +1,7 @@
 import Carbon.HIToolbox
 import CoreGraphics
 import Foundation
+import MyDikteKit
 import os
 
 /// Owns the app's three global shortcuts across the two mechanisms that survive secure input.

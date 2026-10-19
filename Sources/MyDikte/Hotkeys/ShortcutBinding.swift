@@ -2,6 +2,7 @@ import AppKit
 import Carbon.HIToolbox
 import CoreGraphics
 import Foundation
+import MyDikteKit
 
 /// The one place that maps the primitives `Settings` persists onto the types that actually register
 /// a shortcut, in both directions.

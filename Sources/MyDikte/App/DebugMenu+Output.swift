@@ -1,4 +1,5 @@
 import AppKit
+import MyDikteKit
 
 /// This step's own debug menu entry, added through Step 1's hook (`DebugMenu.register`) without
 /// editing `App/DebugMenu.swift` or `App/AppDelegate.swift`, neither of which this step owns.

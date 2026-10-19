@@ -3,6 +3,7 @@ import Carbon.HIToolbox
 import Testing
 
 @testable import MyDikte
+@testable import MyDikteKit
 
 /// Everything about the insertion path that can be proven without typing into the user's screen.
 ///

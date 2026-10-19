@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import MyDikteKit
 import os
 
 /// One dictation's worth of resolved settings, read once when recording starts so that a settings

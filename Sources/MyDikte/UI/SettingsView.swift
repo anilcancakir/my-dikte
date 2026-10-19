@@ -1,5 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
+import MyDikteKit
 import SwiftUI
 
 /// The five settings panes: shortcuts, glossary, models, keys and behaviour. Every field maps to

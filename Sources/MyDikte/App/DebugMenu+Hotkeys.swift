@@ -1,4 +1,5 @@
 import AppKit
+import MyDikteKit
 import os
 
 /// This step's own debug menu entries, added through Step 1's hook (`DebugMenu.register`) without

@@ -1,6 +1,7 @@
 import ApplicationServices
 import CoreGraphics
 import Foundation
+import MyDikteKit
 import os
 
 /// Owns the `CGEventTap` that carries the push-to-talk chord, including the three ways it dies.

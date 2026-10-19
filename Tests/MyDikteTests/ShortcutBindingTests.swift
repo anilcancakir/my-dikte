@@ -4,6 +4,7 @@ import Foundation
 import Testing
 
 @testable import MyDikte
+@testable import MyDikteKit
 
 /// Covers the bridge between the primitives `Settings` persists and the two mechanisms
 /// `ShortcutCoordinator` registers. This is the layer that was missing: the settings file held

@@ -1,4 +1,5 @@
 import AppKit
+import MyDikteKit
 import os
 
 /// The two sounds a dictation makes: one when the microphone is actually live, a different one when

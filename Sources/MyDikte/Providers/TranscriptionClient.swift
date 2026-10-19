@@ -1,4 +1,5 @@
 import Foundation
+import MyDikteKit
 import os
 
 /// One provider's transcription request shape.

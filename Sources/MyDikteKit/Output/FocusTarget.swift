@@ -11,17 +11,17 @@ import AppKit
 /// Holds the process identifier rather than the `NSRunningApplication` itself. That keeps the value
 /// `Sendable` for the crossing from the capture site to the insertion site, and it turns an
 /// application that quit in the meantime into an explicit failure instead of a stale reference.
-struct FocusTarget: Sendable, Equatable {
-    let processIdentifier: pid_t
-    let bundleIdentifier: String?
-    let localizedName: String?
+package struct FocusTarget: Sendable, Equatable {
+    package let processIdentifier: pid_t
+    package let bundleIdentifier: String?
+    package let localizedName: String?
 
     /// The frontmost application right now. Call this when recording starts.
     ///
     /// - Returns: `nil` when the window server reports no frontmost application, which happens
     ///   while the login window or a screen saver owns the display.
     @MainActor
-    static func current() -> FocusTarget? {
+    package static func current() -> FocusTarget? {
         guard let application = NSWorkspace.shared.frontmostApplication else {
             return nil
         }
@@ -34,14 +34,14 @@ struct FocusTarget: Sendable, Equatable {
     }
 
     /// What to call this application in a message the user reads.
-    var displayName: String {
+    package var displayName: String {
         localizedName ?? bundleIdentifier ?? "process \(processIdentifier)"
     }
 
     /// Whether this application currently owns keyboard focus, which is the condition a posted
     /// keystroke is actually delivered under.
     @MainActor
-    var isFrontmost: Bool {
+    package var isFrontmost: Bool {
         NSWorkspace.shared.frontmostApplication?.processIdentifier == processIdentifier
     }
 
@@ -51,7 +51,7 @@ struct FocusTarget: Sendable, Equatable {
     ///   A `true` result only means the request was accepted; activation is asynchronous, so the
     ///   caller still has to wait for `isFrontmost`.
     @MainActor
-    func activate() -> Bool {
+    package func activate() -> Bool {
         guard let application = NSRunningApplication(processIdentifier: processIdentifier) else {
             return false
         }

@@ -14,19 +14,24 @@ import os
 /// State is guarded with `NSLock`, and `register` is expected to be called from the main thread,
 /// because `GetApplicationEventTarget()` is the app's own event target and the run loop that dispatches
 /// to it is the main one.
-final class CarbonHotkey: @unchecked Sendable {
+package final class CarbonHotkey: @unchecked Sendable {
     /// A keyed shortcut: a virtual keycode plus Carbon's modifier mask (`cmdKey`, `optionKey`,
     /// `controlKey`, `shiftKey`), which is not the same bit layout as `CGEventFlags`.
-    struct Binding: Sendable, Equatable {
-        let keyCode: UInt32
-        let modifiers: UInt32
+    package struct Binding: Sendable, Equatable {
+        package let keyCode: UInt32
+        package let modifiers: UInt32
+
+        package init(keyCode: UInt32, modifiers: UInt32) {
+            self.keyCode = keyCode
+            self.modifiers = modifiers
+        }
     }
 
-    enum Failure: Error, LocalizedError, Equatable {
+    package enum Failure: Error, LocalizedError, Equatable {
         case handlerInstallationFailed(OSStatus)
         case registrationFailed(OSStatus)
 
-        var errorDescription: String? {
+        package var errorDescription: String? {
             switch self {
             case let .handlerInstallationFailed(status):
                 return "Could not install the Carbon hot-key handler (OSStatus \(status))."
@@ -45,7 +50,7 @@ final class CarbonHotkey: @unchecked Sendable {
     private var handlerRef: EventHandlerRef?
     private var registrations: [UInt32: EventHotKeyRef] = [:]
 
-    init(onHotkey: @escaping @Sendable (UInt32) -> Void) {
+    package init(onHotkey: @escaping @Sendable (UInt32) -> Void) {
         self.onHotkey = onHotkey
     }
 
@@ -54,7 +59,7 @@ final class CarbonHotkey: @unchecked Sendable {
     }
 
     /// Registers `binding` under `id`, replacing any previous registration for that id.
-    func register(_ binding: Binding, id: UInt32) throws {
+    package func register(_ binding: Binding, id: UInt32) throws {
         try installHandlerIfNeeded()
         unregister(id: id)
 
@@ -80,7 +85,7 @@ final class CarbonHotkey: @unchecked Sendable {
         logger.notice("registered Carbon hot key \(id, privacy: .public)")
     }
 
-    func unregister(id: UInt32) {
+    package func unregister(id: UInt32) {
         stateLock.lock()
         let reference: EventHotKeyRef? = registrations.removeValue(forKey: id)
         stateLock.unlock()
@@ -95,7 +100,7 @@ final class CarbonHotkey: @unchecked Sendable {
         }
     }
 
-    func unregisterAll() {
+    package func unregisterAll() {
         stateLock.lock()
         let references: [UInt32: EventHotKeyRef] = registrations
         registrations = [:]
