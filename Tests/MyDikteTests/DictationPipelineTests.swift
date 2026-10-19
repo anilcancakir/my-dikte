@@ -628,6 +628,62 @@ struct LatchedRecordingTests {
     }
 }
 
+/// Where a finished dictation goes. The remote run's text belongs at the other Mac's caret, so this
+/// Mac must never paste or touch its own pasteboard for it, except when the link is gone and the
+/// clipboard is the only way left to keep the text.
+@Suite("Output routing")
+struct OutputRoutingTests {
+    @Test("a local run with auto-insert on pastes here")
+    func localAutoInsertPastesLocally() {
+        let route = DictationPipeline.outputRoute(origin: .local, peerLost: false, autoInsert: true)
+        #expect(route == .insertLocally)
+    }
+
+    @Test("a local run with auto-insert off only writes the clipboard")
+    func localWithoutAutoInsertIsClipboardOnly() {
+        let route = DictationPipeline.outputRoute(origin: .local, peerLost: false, autoInsert: false)
+        #expect(route == .clipboardOnly)
+    }
+
+    @Test("a remote run sends its text to the peer whatever the local auto-insert setting says")
+    func remoteSendsToPeer() {
+        for autoInsert in [true, false] {
+            let route = DictationPipeline.outputRoute(origin: .remote, peerLost: false, autoInsert: autoInsert)
+            #expect(route == .sendToPeer)
+        }
+    }
+
+    @Test("a remote run whose peer is gone writes the clipboard and never pastes here")
+    func lostPeerIsClipboardOnly() {
+        for autoInsert in [true, false] {
+            let route = DictationPipeline.outputRoute(origin: .remote, peerLost: true, autoInsert: autoInsert)
+            #expect(route == .clipboardOnly)
+        }
+    }
+
+    @Test("a lost peer does not change where a local run goes")
+    func lostPeerIgnoredForLocalRuns() {
+        let route = DictationPipeline.outputRoute(origin: .local, peerLost: true, autoInsert: true)
+        #expect(route == .insertLocally)
+    }
+}
+
+/// This Mac swallows a bare Return or Space only for a recording it started itself. A remote run is
+/// ended from the other Mac, where those keys belong to the focused application.
+@Suite("Latched recording by origin")
+struct LatchedRecordingOriginTests {
+    @Test("a remote recording is never latched here, even when started like a latched one")
+    func remoteRecordingIsNotLatched() {
+        #expect(!DictationPipeline.isLatchedRecording(stage: .recording, trigger: .latched, origin: .remote))
+    }
+
+    @Test("a local recording keeps the latched rule")
+    func localRecordingIsUnchanged() {
+        #expect(DictationPipeline.isLatchedRecording(stage: .recording, trigger: .latched, origin: .local))
+        #expect(!DictationPipeline.isLatchedRecording(stage: .recording, trigger: .heldChord, origin: .local))
+    }
+}
+
 /// The "speak now" cue fires on a level reading rather than on the call that starts the engine,
 /// because those are 1.5 s apart on a Bluetooth microphone and the user asked for the later one.
 @Suite("Microphone live cue")

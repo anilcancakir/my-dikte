@@ -345,6 +345,10 @@ final class DictationPipeline {
     /// cancel or by error.
     var onLatchedRecordingChange: (Bool) -> Void = { _ in }
 
+    /// The finished text of a run the other Mac triggered. The remote layer owns delivery; this Mac
+    /// writes nothing for such a run, so the text can only reach the peer's caret through here.
+    var onRemoteResult: (String) -> Void = { _ in }
+
     /// How the recording that is running now was started, which is what decides whether a bare Return
     /// or Space may end it.
     enum RecordingTrigger: Sendable, Equatable {
@@ -375,6 +379,12 @@ final class DictationPipeline {
     private var activeMode: DictationRecord.Mode = .dictate
     private var requestedTrigger: RecordingTrigger = .latched
     private var activeTrigger: RecordingTrigger = .latched
+    private var requestedOrigin: TriggerOrigin = .local
+    /// Persists after the run ends, like `activeMode`, so the final idle stage is still attributed to
+    /// the remote run that produced it.
+    private(set) var activeOrigin: TriggerOrigin = .local
+    /// Set when the link dropped during a remote run, which sends its text to the clipboard instead.
+    private var isRemotePeerLost = false
     /// What the shortcut layer was last told, so it hears a change and not every stage transition.
     private var isPublishedAsLatched = false
     /// Set when a recording starts, cleared by the first buffer carrying sound. One "speak now" cue
@@ -447,10 +457,27 @@ final class DictationPipeline {
     ///
     /// Always latched: this shortcut is a key pressed and released, so nothing is being held that could
     /// end the recording on its own.
-    func toggleRequested(mode: DictationRecord.Mode = .dictate) {
+    ///
+    /// - Parameter origin: whose shortcut this was. Like `mode`, it only applies to a press that starts
+    ///   a dictation.
+    func toggleRequested(mode: DictationRecord.Mode = .dictate, origin: TriggerOrigin = .local) {
         requestedMode = mode
         requestedTrigger = .latched
+        requestedOrigin = origin
         perform(machine.handle(.toggleRequested))
+    }
+
+    /// The link to the other Mac dropped. A recording is stopped the normal way so its text is still
+    /// transcribed; a run already past the microphone only has its output rerouted.
+    func remotePeerLost() {
+        guard activeOrigin == .remote, machine.stage != .idle else {
+            return
+        }
+
+        isRemotePeerLost = true
+        if machine.stage == .recording {
+            stopRequested()
+        }
     }
 
     func cancelRequested() {
@@ -477,7 +504,7 @@ final class DictationPipeline {
         // encode and transcribe window. That makes it measurable without a voice, which is the only way
         // the pre-warm can be measured at all.
         prewarmChatConnection(mode: mode, configuration: configuration)
-        beginProcessing(mode: mode, target: target, preCaptured: recording)
+        beginProcessing(mode: mode, origin: .local, target: target, preCaptured: recording)
     }
 
     // MARK: - Carrying out what the table decided
@@ -494,7 +521,7 @@ final class DictationPipeline {
         case .beginRecording:
             beginRecording()
         case .stopAndProcess:
-            beginProcessing(mode: activeMode, target: focusTarget, preCaptured: nil)
+            beginProcessing(mode: activeMode, origin: activeOrigin, target: focusTarget, preCaptured: nil)
         case .discardRecording:
             // Same engine and same spool as a warm-up, so this is also the discard path.
             capture.cancelWarmUp()
@@ -526,10 +553,12 @@ final class DictationPipeline {
         configuration = PipelineConfiguration(settings: .load())
         activeMode = requestedMode
         activeTrigger = requestedTrigger
+        activeOrigin = requestedOrigin
+        isRemotePeerLost = false
         // Captured now rather than when the text is ready: the round trip is long enough for the
         // user to glance at another window, and pasting into that window is how a dictation lands
-        // in the wrong app.
-        focusTarget = FocusTarget.current()
+        // in the wrong app. A remote run pastes on the other Mac, so this Mac's focus is irrelevant.
+        focusTarget = activeOrigin == .local ? FocusTarget.current() : nil
 
         do {
             try capture.beginKeeping()
@@ -627,6 +656,7 @@ final class DictationPipeline {
 
     private func beginProcessing(
         mode: DictationRecord.Mode,
+        origin: TriggerOrigin,
         target: FocusTarget?,
         preCaptured: AudioCapture.Recording?
     ) {
@@ -637,7 +667,13 @@ final class DictationPipeline {
         // Cancelling an already-finished task is harmless, so keeping the stale handle is the safe
         // side of that trade.
         processingTask = Task { [weak self] in
-            await self?.run(mode: mode, target: target, configuration: configuration, preCaptured: preCaptured)
+            await self?.run(
+                mode: mode,
+                origin: origin,
+                target: target,
+                configuration: configuration,
+                preCaptured: preCaptured
+            )
         }
     }
 
@@ -645,6 +681,7 @@ final class DictationPipeline {
 
     private func run(
         mode: DictationRecord.Mode,
+        origin: TriggerOrigin,
         target: FocusTarget?,
         configuration: PipelineConfiguration,
         preCaptured: AudioCapture.Recording?
@@ -859,7 +896,12 @@ final class DictationPipeline {
             try Task.checkCancellation()
             advanceToInserting()
             let insertStarted = ContinuousClock.now
-            let insertionNote = try await insert(choice.text, into: target, configuration: configuration)
+            let insertionNote = try await insert(
+                choice.text,
+                origin: origin,
+                into: target,
+                configuration: configuration
+            )
             timings.record(.insert, seconds: Self.elapsed(since: insertStarted))
 
             // 9. The record and every stage timing, plus the audio when retention is on.
@@ -966,12 +1008,29 @@ final class DictationPipeline {
     /// dictation happened either way and must be recorded.
     private func insert(
         _ text: String,
+        origin: TriggerOrigin,
         into target: FocusTarget?,
         configuration: PipelineConfiguration
     ) async throws -> String? {
-        guard configuration.autoInsert else {
+        let route: OutputRoute = Self.outputRoute(
+            origin: origin,
+            peerLost: isRemotePeerLost,
+            autoInsert: configuration.autoInsert
+        )
+        switch route {
+        case .sendToPeer:
+            onRemoteResult(text)
+            return nil
+        case .clipboardOnly where origin == .remote:
+            // Universal Clipboard carries this to the other Mac; pasting here would land the text in
+            // whatever this Mac has focused, which the remote user never chose.
+            try TextInserter.write(text, to: .general)
+            return "The other Mac disconnected, so the text is on the clipboard."
+        case .clipboardOnly:
             try TextInserter.write(text, to: .general)
             return "Auto-insert is off, so the text is on the clipboard."
+        case .insertLocally:
+            break
         }
         guard let target else {
             try TextInserter.write(text, to: .general)
@@ -1017,7 +1076,7 @@ final class DictationPipeline {
     /// are seven of those, and a missed one would leave the two keys swallowed after the recording was
     /// over, which is the one failure this feature must not have.
     private func publishLatchedRecording(for stage: PipelineStage) {
-        let isLatched: Bool = Self.isLatchedRecording(stage: stage, trigger: activeTrigger)
+        let isLatched: Bool = Self.isLatchedRecording(stage: stage, trigger: activeTrigger, origin: activeOrigin)
         guard isLatched != isPublishedAsLatched else {
             return
         }
@@ -1031,9 +1090,33 @@ final class DictationPipeline {
     /// A latched recording is one that runs until something ends it, which is a keyed shortcut's or the
     /// menu's. The chord is excluded because releasing it already ends the gesture, and every stage
     /// other than `recording` is excluded because the keys are watched for the seconds a recording
-    /// lasts and not a moment longer.
-    nonisolated static func isLatchedRecording(stage: PipelineStage, trigger: RecordingTrigger) -> Bool {
-        stage == .recording && trigger == .latched
+    /// lasts and not a moment longer. A remote run is excluded as well: its Return and Space belong to
+    /// the other Mac's focused application, and swallowing them here would break this Mac's own typing
+    /// for a recording this Mac's keys cannot end.
+    nonisolated static func isLatchedRecording(
+        stage: PipelineStage,
+        trigger: RecordingTrigger,
+        origin: TriggerOrigin = .local
+    ) -> Bool {
+        stage == .recording && trigger == .latched && origin == .local
+    }
+
+    /// Where a finished dictation goes.
+    enum OutputRoute: Sendable, Equatable {
+        case insertLocally
+        case sendToPeer
+        case clipboardOnly
+    }
+
+    /// A remote run never touches this Mac's caret: it goes to the peer, or to the clipboard when the
+    /// peer is gone. Only a local run consults the auto-insert setting.
+    nonisolated static func outputRoute(origin: TriggerOrigin, peerLost: Bool, autoInsert: Bool) -> OutputRoute {
+        switch origin {
+        case .remote:
+            return peerLost ? .clipboardOnly : .sendToPeer
+        case .local:
+            return autoInsert ? .insertLocally : .clipboardOnly
+        }
     }
 
     private func finish(message: String?, isFailure: Bool) {

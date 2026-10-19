@@ -191,7 +191,7 @@ struct ShortcutBindingTests {
             configuration.toggle
                 == CarbonHotkey.Binding(keyCode: UInt32(kVK_ANSI_J), modifiers: UInt32(controlKey | shiftKey))
         )
-        #expect(configuration.cancel == ShortcutCoordinator.Configuration.Binding.defaultCancel)
+        #expect(configuration.cancel == CarbonHotkey.Binding.defaultCancel)
     }
 
     @Test("an invalid persisted chord falls back rather than leaving the user with a dead shortcut")
@@ -209,7 +209,7 @@ struct ShortcutBindingTests {
 
         #expect(
             ShortcutBinding.configuration(from: settings).promptToggle
-                == ShortcutCoordinator.Configuration.Binding.defaultPromptToggle
+                == CarbonHotkey.Binding.defaultPromptToggle
         )
     }
 
