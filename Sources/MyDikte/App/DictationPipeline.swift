@@ -445,6 +445,9 @@ final class DictationPipeline {
     func startRequested(mode: DictationRecord.Mode = .dictate, trigger: RecordingTrigger = .latched) {
         requestedMode = mode
         requestedTrigger = trigger
+        // Only the remote toggle starts a remote run. Without this reset the origin left by the last
+        // remote toggle would carry into this Mac's own chord or menu start and send it to the peer.
+        requestedOrigin = .local
         perform(machine.handle(.startRequested))
     }
 
@@ -495,6 +498,7 @@ final class DictationPipeline {
         }
 
         configuration = PipelineConfiguration(settings: .load())
+        activeOrigin = .local
         _ = machine.handle(.startRequested)
         _ = machine.handle(.stopRequested)
         indicator.beginRun(stage: machine.stage)
@@ -1019,6 +1023,10 @@ final class DictationPipeline {
         )
         switch route {
         case .sendToPeer:
+            // Written here first because delivery is fire-and-forget: an ssh link that died a moment ago
+            // is only noticed after its keep-alive, and the text must survive that window. Universal
+            // Clipboard carries it to the other Mac, where the paste writes the same text anyway.
+            try TextInserter.write(text, to: .general)
             onRemoteResult(text)
             return nil
         case .clipboardOnly where origin == .remote:

@@ -3,16 +3,11 @@ import Carbon.HIToolbox
 import MyDikteKit
 import os
 
+/// The work Mac's half of a remote dictation: registers the shortcuts this Mac's hello names, sends
+/// their presses over the relay socket, shows the run's stage, and pastes the returned text into the
+/// application that was in front when the run started. It records nothing itself.
 @MainActor
 final class RemoteAppDelegate: NSObject, NSApplicationDelegate {
-    private enum PasteFailure: Error, LocalizedError {
-        case noTarget
-
-        var errorDescription: String? {
-            "No application was in front when recording started, so nothing was pasted. The text is on the clipboard."
-        }
-    }
-
     /// Fixed Carbon ids for the three shortcuts, so a rebinding replaces a registration in place.
     private static let hotkeys: [
         (id: UInt32, key: RemoteHotkey, binding: KeyPath<RemoteShortcuts, CarbonHotkey.Binding>)
@@ -57,7 +52,9 @@ final class RemoteAppDelegate: NSObject, NSApplicationDelegate {
         // The paste posts Cmd-V, which macOS drops silently without Accessibility. Asking at launch is
         // what puts this app in the Accessibility list at all; without the prompt it never appears.
         // The literal key, because `kAXTrustedCheckOptionPrompt` is a mutable global under Swift 6.
-        let promptOption: [String: Bool] = ["AXTrustedCheckOptionPrompt": true]
+        let promptOption: [String: Bool] = [
+            "AXTrustedCheckOptionPrompt": true,
+        ]
         if !AXIsProcessTrustedWithOptions(promptOption as CFDictionary) {
             logger.notice("Accessibility not granted yet; the system prompt was shown")
         }
@@ -220,7 +217,8 @@ final class RemoteAppDelegate: NSObject, NSApplicationDelegate {
             do {
                 guard let target else {
                     try TextInserter.write(text, to: .general)
-                    throw PasteFailure.noTarget
+                    panel.show(message: "No application was in front when recording started, so the text is on the clipboard.")
+                    return
                 }
                 try await TextInserter.insert(text, into: target)
             } catch {

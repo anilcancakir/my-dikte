@@ -63,7 +63,8 @@ while true; do
     fi
 
     say "Building ${commit:0:7} (release)..."
-    ( cd "$WORKTREE" && swift build -c release --product MyDikteRemote 2>&1 | tail -1 )
+    # The tail is the log's only copy of a failed background build, so it keeps enough to read the error.
+    ( cd "$WORKTREE" && swift build -c release --product MyDikteRemote 2>&1 | tail -40 )
 
     # 3. Hardened Runtime but no entitlements file: the remote app needs neither microphone nor network.
     say "Assembling and signing..."
@@ -91,7 +92,11 @@ set -e
 app="\$HOME/$REMOTE_APP"
 marker="\$HOME/$REMOTE_MARKER"
 pkill -xf "\$app/Contents/MacOS/MyDikteRemote" || true
-sleep 0.5
+# Wait for the old instance to exit: if it is still up, open activates it instead of the new build.
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    pgrep -xf "\$app/Contents/MacOS/MyDikteRemote" > /dev/null || break
+    sleep 0.5
+done
 rm -rf "\$app"
 mv "\$app.next" "\$app"
 mkdir -p "\$(dirname "\$marker")"

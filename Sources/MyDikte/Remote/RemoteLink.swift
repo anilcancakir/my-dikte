@@ -236,10 +236,8 @@ final class RemoteLink {
         ended.stderr.readabilityHandler = nil
 
         // A recording is stopped the normal way so its text is not lost; the pipeline reroutes the
-        // output, which has nowhere to go while the link is down.
-        if pipeline.activeOrigin == .remote {
-            pipeline.remotePeerLost()
-        }
+        // output, which has nowhere to go while the link is down. It ignores this for a local run.
+        pipeline.remotePeerLost()
         scheduleReconnect(afterSessionLasting: ended.launchedAt.duration(to: .now))
     }
 
@@ -283,6 +281,12 @@ final class RemoteLink {
         switch message {
         case let .trigger(.toggle(mode)):
             pipeline.toggleRequested(mode: Self.dictationMode(for: mode), origin: .remote)
+            // The press reached a run of this Mac's own (it stopped one, or was ignored while one works),
+            // so no remote stage will follow. The work Mac would otherwise keep the paste target it just
+            // captured and aim the next run at it.
+            if pipeline.activeOrigin != .remote {
+                send(.failure(message: "The other Mac is busy with its own dictation."))
+            }
         case .trigger(.cancel):
             pipeline.cancelRequested()
         case .hello, .stage, .result, .failure:

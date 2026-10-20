@@ -65,7 +65,7 @@ final class RemoteIndicatorPanel: NSPanel {
         case .processing:
             present("Processing", autoHide: false)
         case .idle:
-            // A failure or paste error arrives just before the idle stage and must stay readable.
+            // A failure arrives just after the idle stage, and a paste error later still; both must stay readable.
             if !isShowingMessage {
                 hide()
             }
