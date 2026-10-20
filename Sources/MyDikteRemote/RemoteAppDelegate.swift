@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import MyDikteKit
 import os
 
@@ -13,10 +14,19 @@ final class RemoteAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Fixed Carbon ids for the three shortcuts, so a rebinding replaces a registration in place.
-    private static let hotkeys: [(id: UInt32, key: RemoteHotkey)] = [
-        (1, .toggle),
-        (2, .promptToggle),
-        (3, .cancel),
+    private static let hotkeys: [
+        (id: UInt32, key: RemoteHotkey, binding: KeyPath<RemoteShortcuts, CarbonHotkey.Binding>)
+    ] = [
+        (1, .toggle, \.toggle),
+        (2, .promptToggle, \.promptToggle),
+        (3, .cancel, \.cancel),
+    ]
+
+    /// Bare Space and Return, which end a recording this Mac started. They are registered only while the
+    /// session records (`syncStopKeys`): a global registration swallows the key from every app.
+    private static let stopHotkeys: [(id: UInt32, binding: CarbonHotkey.Binding)] = [
+        (4, CarbonHotkey.Binding(keyCode: UInt32(kVK_Space), modifiers: 0)),
+        (5, CarbonHotkey.Binding(keyCode: UInt32(kVK_Return), modifiers: 0)),
     ]
 
     private static var shortcutsURL: URL {
@@ -27,6 +37,7 @@ final class RemoteAppDelegate: NSObject, NSApplicationDelegate {
     private let panel = RemoteIndicatorPanel()
     private var session = RemoteSession()
     private var shortcuts: RemoteShortcuts = .default
+    private var stopKeysRegistered = false
     private var registrationProblem: String?
     private var serverProblem: String?
     private var statusItem: NSStatusItem?
@@ -72,7 +83,12 @@ final class RemoteAppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Hot keys
 
     private func hotkeyPressed(id: UInt32) {
-        guard let key = Self.hotkeys.first(where: { $0.id == id })?.key else {
+        let key: RemoteHotkey
+        if Self.stopHotkeys.contains(where: { $0.id == id }) {
+            key = .stop
+        } else if let known = Self.hotkeys.first(where: { $0.id == id })?.key {
+            key = known
+        } else {
             return
         }
 
@@ -80,12 +96,15 @@ final class RemoteAppDelegate: NSObject, NSApplicationDelegate {
         case .beep:
             NSSound.beep()
             refreshStatus()
+        case .ignore:
+            break
         case let .send(message, _):
             do {
                 try server.send(message)
             } catch {
                 logger.error("send failed: \(error.localizedDescription, privacy: .public)")
                 session.disconnected()
+                syncStopKeys()
                 NSSound.beep()
                 refreshStatus()
             }
@@ -94,9 +113,9 @@ final class RemoteAppDelegate: NSObject, NSApplicationDelegate {
 
     private func register(_ shortcuts: RemoteShortcuts) {
         var failures: [String] = []
-        for (id, key) in Self.hotkeys {
+        for (id, _, binding) in Self.hotkeys {
             do {
-                try carbon.register(Self.binding(for: key, in: shortcuts), id: id)
+                try carbon.register(shortcuts[keyPath: binding], id: id)
             } catch {
                 logger.error("hot key \(id, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
                 failures.append(error.localizedDescription)
@@ -105,11 +124,26 @@ final class RemoteAppDelegate: NSObject, NSApplicationDelegate {
         registrationProblem = failures.first
     }
 
-    private static func binding(for key: RemoteHotkey, in shortcuts: RemoteShortcuts) -> CarbonHotkey.Binding {
-        switch key {
-        case .toggle: return shortcuts.toggle
-        case .promptToggle: return shortcuts.promptToggle
-        case .cancel: return shortcuts.cancel
+    /// The one place that decides whether Space and Return are registered: only while the session
+    /// records. A failed registration is logged and left alone, since the toggle key still stops the run.
+    private func syncStopKeys() {
+        let wanted: Bool = session.state == .recording
+        guard wanted != stopKeysRegistered else {
+            return
+        }
+        stopKeysRegistered = wanted
+
+        for (id, binding) in Self.stopHotkeys {
+            guard wanted else {
+                carbon.unregister(id: id)
+                continue
+            }
+
+            do {
+                try carbon.register(binding, id: id)
+            } catch {
+                logger.error("stop key \(id, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+            }
         }
     }
 
@@ -152,6 +186,7 @@ final class RemoteAppDelegate: NSObject, NSApplicationDelegate {
         case let .listenerFailed(reason):
             serverProblem = reason
         }
+        syncStopKeys()
         refreshStatus()
     }
 

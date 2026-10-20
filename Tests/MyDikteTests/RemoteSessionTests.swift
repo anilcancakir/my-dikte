@@ -96,6 +96,43 @@ struct RemoteSessionTests {
         #expect(session.target == Self.editor)
     }
 
+    @Test("stop while recording sends toggle dictate without capturing a target")
+    func stopWhileRecordingSendsToggle() {
+        var session = Self.connectedSession()
+        _ = session.press(.toggle, frontmost: Self.editor)
+        session.receive(.stage(.recording))
+
+        let action: RemoteSessionAction = session.press(.stop, frontmost: Self.browser)
+
+        #expect(action == .send(.trigger(.toggle(.dictate)), capture: nil))
+        #expect(session.target == Self.editor)
+    }
+
+    @Test("stop while recording sends toggle dictate for a prompt run too")
+    func stopEndsAPromptRun() {
+        var session = Self.connectedSession()
+        _ = session.press(.promptToggle, frontmost: Self.editor)
+        session.receive(.stage(.recording))
+
+        let action: RemoteSessionAction = session.press(.stop, frontmost: Self.browser)
+
+        #expect(action == .send(.trigger(.toggle(.dictate)), capture: nil))
+    }
+
+    @Test("stop when nothing records is ignored, neither sent nor beeped")
+    func stopOutsideRecordingIsIgnored() {
+        var disconnected = RemoteSession()
+        #expect(disconnected.press(.stop, frontmost: Self.editor) == .ignore)
+
+        var idle = Self.connectedSession()
+        #expect(idle.press(.stop, frontmost: Self.editor) == .ignore)
+        #expect(idle.target == nil)
+
+        var processing = Self.connectedSession()
+        processing.receive(.stage(.processing))
+        #expect(processing.press(.stop, frontmost: Self.editor) == .ignore)
+    }
+
     @Test("stages move the state, and idle ends the run and releases the target")
     func stagesMoveTheState() {
         var session = Self.connectedSession()

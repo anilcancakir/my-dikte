@@ -3,6 +3,8 @@ package enum RemoteHotkey: Sendable, Equatable {
     case toggle
     case promptToggle
     case cancel
+    /// Space or Return, which the app registers only while a recording runs.
+    case stop
 }
 
 /// What the work Mac app does in answer to a press.
@@ -12,6 +14,8 @@ package enum RemoteSessionAction: Sendable, Equatable {
     case send(RemoteMessage, capture: FocusTarget?)
     /// Nothing to send: there is no connection, so the press is told apart from a working one.
     case beep
+    /// Nothing to send and nothing to say: a stop key pressed when no recording runs.
+    case ignore
 }
 
 /// The work Mac's side of a remote run, as a pure value so what a press does in each state is
@@ -39,7 +43,9 @@ package struct RemoteSession: Sendable, Equatable {
 
     package mutating func press(_ key: RemoteHotkey, frontmost: FocusTarget?) -> RemoteSessionAction {
         guard state != .disconnected else {
-            return .beep
+            // A stop key outside a recording is a leftover press of a registration that is about to go,
+            // not a gesture to answer with a beep.
+            return key == .stop ? .ignore : .beep
         }
 
         switch key {
@@ -49,6 +55,9 @@ package struct RemoteSession: Sendable, Equatable {
             return toggle(.prompt, frontmost: frontmost)
         case .cancel:
             return .send(.trigger(.cancel), capture: nil)
+        case .stop:
+            // The other Mac's toggle ends a running recording whatever its mode.
+            return state == .recording ? .send(.trigger(.toggle(.dictate)), capture: nil) : .ignore
         }
     }
 
