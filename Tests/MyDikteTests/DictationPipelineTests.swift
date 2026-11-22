@@ -476,6 +476,43 @@ struct PipelineConfigurationTests {
             PipelineConfiguration.chatKeychainAccount(forEndpoint: "https://api.anthropic.com/v1/messages")
                 == "cleanup-anthropic"
         )
+        #expect(
+            PipelineConfiguration.chatKeychainAccount(forEndpoint: "https://gateway.kodizm.com/v1/chat/completions")
+                == "cleanup-gateway.kodizm.com"
+        )
+    }
+
+    @Test("a host the app has no account for gets its own, and never the Groq key")
+    func unknownHostGetsItsOwnAccount() {
+        let account = PipelineConfiguration.chatKeychainAccount(
+            forEndpoint: "https://api.openai.com/v1/chat/completions"
+        )
+
+        #expect(account == "cleanup-api.openai.com")
+        #expect(account != "cleanup-groq")
+    }
+
+    @Test("a host is matched without regard to case or a trailing dot")
+    func hostMatchingIgnoresCaseAndTrailingDot() {
+        #expect(
+            PipelineConfiguration.chatKeychainAccount(forEndpoint: "https://API.GROQ.COM/openai/v1/chat/completions")
+                == "cleanup-groq"
+        )
+        #expect(
+            PipelineConfiguration.chatKeychainAccount(forEndpoint: "https://api.groq.com./openai/v1/chat/completions")
+                == "cleanup-groq"
+        )
+        #expect(
+            PipelineConfiguration.chatKeychainAccount(forEndpoint: "https://Gateway.Kodizm.com/v1/chat/completions")
+                == "cleanup-gateway.kodizm.com"
+        )
+    }
+
+    @Test("an endpoint with no host never borrows the Groq account, so typing it cannot overwrite that key")
+    func endpointWithoutHostGetsNoProviderAccount() {
+        let account = PipelineConfiguration.chatKeychainAccount(forEndpoint: "gateway.kodizm.com/v1/chat/completions")
+
+        #expect(account == "cleanup-invalid-endpoint")
     }
 
     @Test("the reply budget is sized to the transcript rather than left open")

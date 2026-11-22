@@ -8,9 +8,9 @@ import os
 ///
 /// It resolves two things `Settings` leaves open. An empty model id means "not configured", not
 /// "send an empty model", so it falls back to the two models this plan actually measured. And the
-/// chat endpoint has one Keychain account per supported provider (`cleanup-groq`,
-/// `cleanup-openrouter`, `cleanup-anthropic`), so an endpoint that is still on `Settings`' untouched
-/// default resolves to Groq rather than authenticating against a key that cannot exist.
+/// chat endpoint's Keychain account follows its host (`cleanup-groq`, `cleanup-openrouter`,
+/// `cleanup-anthropic`, `cleanup-<host>` for any other), so an empty endpoint resolves to Groq
+/// rather than authenticating against a key that cannot exist.
 struct PipelineConfiguration: Sendable, Equatable {
     /// Measured on this machine at 0.38 to 0.66 s warm, and the more accurate model on Turkish
     /// (`evidence/step-02-groq-seam.txt`).
@@ -25,7 +25,8 @@ struct PipelineConfiguration: Sendable, Equatable {
     /// the log this pipeline writes.
     static let defaultCleanupModelId = "openai/gpt-oss-120b"
 
-    /// The same Groq key serves both stages and both stages share one warm TLS connection.
+    /// What an empty cleanup or rewrite endpoint resolves to. Its key is the `cleanup-groq` account,
+    /// separate from the `transcription-groq` one the transcription stage reads.
     static let groqChatEndpoint = "https://api.groq.com/openai/v1/chat/completions"
 
     /// Raised from 768 after a real dictation lost its cleanup to this number.
@@ -127,13 +128,31 @@ struct PipelineConfiguration: Sendable, Equatable {
     }
 
     /// The account the configured endpoint's key lives under. Named per provider so switching
-    /// endpoints never reads the other provider's key, which would fail with an authentication
-    /// error that says nothing about the real cause.
+    /// endpoints never reads, or overwrites, the other provider's key: the pane stores what is typed
+    /// under this account, so a shared one made pointing cleanup at another host replace the Groq key
+    /// and made switching back fail with an authentication error that says nothing about the cause.
+    ///
+    /// Groq, OpenRouter and Anthropic keep the names their keys were stored under before the account
+    /// followed the host; any other host, the Kodizm gateway included, gets `cleanup-<host>`. An
+    /// endpoint with no host (a URL typed without its scheme) gets an account no key is stored under,
+    /// so saving into it cannot overwrite a real provider's key; the request fails on that URL anyway.
     static func chatKeychainAccount(forEndpoint endpoint: String) -> String {
-        if ChatClient.host(forEndpoint: endpoint) == ChatClient.anthropicHost {
+        guard var host = ChatClient.host(forEndpoint: endpoint)?.lowercased() else {
+            return "cleanup-invalid-endpoint"
+        }
+        if host.hasSuffix(".") {
+            host.removeLast()
+        }
+        if host == ChatClient.anthropicHost {
             return "cleanup-anthropic"
         }
-        return endpoint.contains("openrouter.ai") ? "cleanup-openrouter" : "cleanup-groq"
+        if host == "api.groq.com" {
+            return "cleanup-groq"
+        }
+        if host == "openrouter.ai" || host.hasSuffix(".openrouter.ai") {
+            return "cleanup-openrouter"
+        }
+        return "cleanup-\(host)"
     }
 
     /// Sized to the input rather than left open: an unbounded reply budget on a reasoning-capable
