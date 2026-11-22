@@ -35,7 +35,7 @@ request shape and the shortcut recorder.
   tested on Intel either.
 - A [Groq](https://console.groq.com) API key. The free tier is enough for personal use; see the limits
   below.
-- Optionally an [ElevenLabs](https://elevenlabs.io) API key. Scribe v2 reads Turkish technical speech
+- Optionally an [ElevenLabs](https://elevenlabs.io) API key. Scribe reads Turkish technical speech
   measurably better than Whisper and is not free; the comparison and the bill are both below.
 
 ## Build and install
@@ -70,22 +70,33 @@ Open Settings from the menu-bar icon.
 **Keys.** Paste your Groq key. It goes to the login Keychain under service `com.anilcan.mydikte`,
 never to a file. Nothing in this repository reads or writes a key anywhere else.
 
-**Models.** Empty fields mean the built-in default, shown in grey, and the default follows the
-provider: `whisper-large-v3` on Groq, `scribe_v2` on ElevenLabs. Cleanup defaults to
-`openai/gpt-oss-120b` on Groq; this machine runs `claude-haiku-5-5` on the Anthropic API
-(`https://api.anthropic.com/v1/messages`, key under `cleanup-anthropic`), which measured best (see
-below).
+**Models.** Empty fields mean the built-in default, shown in grey. The transcription default follows
+the provider: `whisper-large-v3` on Groq, `scribe_v3` on ElevenLabs. Cleanup defaults to
+`openai/gpt-oss-120b` on Groq whatever the endpoint; this machine runs `claude-haiku-5-5` on the
+Anthropic API (`https://api.anthropic.com/v1/messages`, key under `cleanup-anthropic`), which measured
+best (see below).
+
+**Cleanup endpoints.** Any OpenAI-compatible `/chat/completions` URL works, and so does Anthropic's
+Messages API. The key lives in the Keychain under an account that follows the endpoint's host, so
+switching endpoints never reads or overwrites another provider's key: `cleanup-groq`,
+`cleanup-openrouter` and `cleanup-anthropic` for those three, `cleanup-<host>` for any other (the
+Kodizm gateway, `https://gateway.kodizm.com/v1/chat/completions` with model `junior`, is
+`cleanup-gateway.kodizm.com`). A chat request gives up after 15 s without data and is not retried, and
+a reply that is blank or was cut off (`finish_reason` of `length` or `content_filter`) counts as a
+failure, so the raw transcript is pasted instead.
 
 **Live preview source.** Apple's on-device `SFSpeechRecognizer` (free, offline, nothing leaves the
-machine) or ElevenLabs Scribe v2 realtime ($0.39 per audio hour, needs a connection, reads Turkish
+machine) or ElevenLabs Scribe v2 realtime ($0.22 per audio hour, needs a connection, reads Turkish
 better). Apple is the default, because a preview must never be the reason a dictation costs money.
 Apple's text is always thrown away. With ElevenLabs, the realtime transcript is also the pasted text
 unless **Also upload for a second, more accurate reading** is on, in which case the audio is also
-uploaded to the configured transcription model (batch `scribe_v2` when the provider is ElevenLabs)
+uploaded to the configured transcription model (batch `scribe_v3` when the provider is ElevenLabs)
 and that answer is pasted.
 
 **Glossary.** Terms you say often: product names, libraries, commands. It goes to the transcription
-request as a decoding hint and to the cleanup model as a spelling reference.
+request as a decoding hint and to the cleanup model as a spelling reference. With ElevenLabs the
+transcription request also carries the app's own product and project names (the list in the cleanup
+prompt) after yours, so the glossary only has to hold what is not already there.
 
 **Keep it short.** This is measured, not cautious: on one recording, six focused terms returned
 "LLM-friendly" correctly on three runs of three, and nineteen terms returned "erlenme front" on three
@@ -124,14 +135,14 @@ The keyed cancel stays because it is the one that works under secure input.
 Two hosted services and one on-device model:
 
 - **Groq** `/audio/transcriptions` with `whisper-large-v3`: speech to Turkish text, 400 to 650 ms.
-  Selectable for OpenAI, OpenRouter or **ElevenLabs Scribe v2** instead; ElevenLabs is the accurate
+  Selectable for OpenAI, OpenRouter or **ElevenLabs Scribe** instead; ElevenLabs is the accurate
   one and the slow one, roughly 1.3 s.
 - **A chat model** does two jobs depending on mode, cleanup or prompt rewrite: any OpenAI-compatible
   `/chat/completions` endpoint (Groq, OpenRouter), or Anthropic's native Messages API. On Anthropic
   thinking is turned off, effort is `low`, and the system prompt is cached, because Haiku 5.5 thinks
   by default and the OpenAI-compatible endpoint Anthropic offers can do neither.
 - **Apple `SFSpeechRecognizer`**, on device, `tr-TR`: the live preview. It never leaves the machine
-  and its output is thrown away, because the authoritative text comes from the batch path. Neither
+  and its output is thrown away, because the pasted text comes from another path. Neither
   Groq nor Whisper has a streaming endpoint, so a preview cannot come from the same call that
   produces the final text.
 - **ElevenLabs Scribe v2 realtime** over a WebSocket: the live preview, optionally, instead of Apple,
@@ -178,6 +189,35 @@ All from this machine, all reproducible from the log and the evidence files.
   five minutes of each other, so at Haiku 5.5's $0.10 / $0.50 per million tokens (cache reads
   $0.01) one costs under $0.0001. Detail in
   [`evidence/cleanup-haiku-comparison.md`](evidence/cleanup-haiku-comparison.md).
+- **Through the Kodizm gateway, `junior` cleans better than `quick`, and neither is as fast as Haiku
+  5.5 direct.** Replayed on 25 distinct logged dictations, two runs each (2026-11-23): the paraphrase
+  guard flagged 7 of 50 `junior` replies against 16 of 50 `quick` ones (Haiku 5.5: 3 of 25 logged),
+  `junior` repeated its own reply exactly on 17 of 25 dictations against 11, and `quick` rewrote
+  Turkish verb forms the prompt says to keep. Latency is the gateway's, not the model's: median 3.8 s
+  for `junior` and 3.4 s for `quick` (90th percentile 11.5 s and 9.4 s), against 1.4 s for Haiku 5.5
+  over the 25 dictations in the log. A five-token reply already takes 1.7 to 2.3 s, the gateway adds
+  its own system prompt (about 1,000 prompt tokens for `junior`, 5,300 for `quick`), and
+  `reasoning_effort: low` did not move the median on eight of those dictations (about 3.5 s for both
+  models either way).
+- **A stalled provider used to hold a dictation for three minutes.** One logged Haiku 5.5 cleanup took
+  183 s, which is what three attempts at the 60 s `URLRequest` default plus backoff add up to, and the
+  only way out was to cancel and lose the transcript. The 15 s limit, with no retry after a timeout,
+  bounds that to about 15 s; a dropped connection, a 429 or a 5xx is still retried.
+- **Scribe v3 with the app's own names as keyterms cut word errors from 34% to 15%.** Five recordings of
+  this user's voice over AirPods (8 to 21 s each, three runs per setting, 2026-11-23): Scribe v2 with
+  the five-term glossary this machine had scored 34.1%, Scribe v3 with the same glossary 22.5%, and
+  Scribe v3 with the 44 names from the cleanup prompt alone 15.4% (the request the app now sends,
+  glossary plus names, scored 16.0% in one run). The names crowded nothing out here:
+  terms they did not list were recognised more often (84% against 69% for v3 with no keyterms), and no
+  keyterm showed up in a transcript where it was not spoken. Generic developer words on top did not
+  generalise (16.4% once the words the test texts score were removed, against 15.2% for the names
+  alone). On clips already encoded to 32 kbps AAC, high-pass filtering, loudness normalisation, a speech
+  normaliser and FFT denoising all failed to help, and denoising probably hurt (17.5% against 14.5% for the same
+  audio unfiltered, with run ranges of 17.1 to 18.3 and 13.7 to 15.4 that do not overlap); filtering before the first encode and uploading the
+  original capture as PCM were not tested. Limits: five recordings, one speaker, one microphone, texts written from his own
+  vocabulary so the names overlap the test words, and a run-to-run spread of up to 4.6 points. The
+  script is `bench/stt`, the numbers are in
+  [`evidence/scribe-v3-keyterms.md`](evidence/scribe-v3-keyterms.md).
 - **ElevenLabs Scribe v2 is more accurate on Turkish technical speech and about twice as slow.** On
   the same recordings it returned "socket", "API", "repository" and "Groq" where Whisper returned
   nothing, "AP", "repositor" and "grok", and it does not invent Turkish words the way Whisper does
@@ -190,8 +230,11 @@ All from this machine, all reproducible from the log and the evidence files.
   as "fakültesi" and "A'dan Z'ye" as "AdamZB". Short dictations come out about the same. That is the
   trade behind the upload toggle: realtime is faster and bills the audio once, batch is right more
   often.
-- **ElevenLabs costs about $1 to $2 a month at this usage.** $0.22 per audio hour for batch, $0.39 for
-  realtime, $0.05 on top for keyterms, against a measured median dictation of 9.9 s. Buying a plan
+- **ElevenLabs costs about $1 a month at this usage.** Since 2026-11-17, $0.20 per audio hour for batch
+  and $0.22 for realtime on every Scribe model, and keyterms add $0.05 an hour on batch and $0.08 on
+  realtime (the pricing page; the API reference describes the surcharge as 20%). A median dictation of
+  9.9 s with both running and keyterms on is about $0.0015, so 20 dictations a day is about $0.90 a
+  month. Buying a plan
   gives no discount: every plan's included hours are just its price divided by the same hourly rate.
 - **Billing is per second, and the free tier is larger than the pricing page implies.** Read back from
   the account's own analytics endpoint: 87 requests averaging 11.1 s billed as 16.10 minutes, so
@@ -221,7 +264,10 @@ All from this machine, all reproducible from the log and the evidence files.
 - **Adding a glossary term is not free, measured twice.** Seven terms transcribed "Groq" correctly and
   eight did not, turning it into "Grok"; separately, adding "Opus 5" fixed that name and broke "Groq"
   into "Graf" in the same request. Both models read the field as speech preceding the audio, so an
-  unrelated term crowds out a relevant one. Keep the list at what you actually say out loud.
+  unrelated term crowds out a relevant one. Keep the list at what you actually say out loud. On five
+  recordings, both Scribe v2 and v3 improved with 44 to 75 terms, most of them unspoken in any given
+  clip (see above); the crowding here was measured on Whisper and on an earlier Scribe v2 setup, and
+  how it scales with a long list of unspoken terms on v3 is not settled.
 
 ## Author
 
