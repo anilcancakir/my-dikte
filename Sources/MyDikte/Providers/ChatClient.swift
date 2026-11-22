@@ -120,9 +120,20 @@ struct ChatClient {
                 let content: String?
             }
             let message: Message
+            let finishReason: String?
+
+            enum CodingKeys: String, CodingKey {
+                case message
+                case finishReason = "finish_reason"
+            }
         }
         let choices: [Choice]
     }
+
+    /// How long one cleanup attempt may take. Median cleanup is about a second, and with three
+    /// attempts the 60 s `URLRequest` default would hold a stalled dictation for about three minutes
+    /// when the raw transcript is the better outcome.
+    static let requestTimeoutSeconds: TimeInterval = 15
 
     private let endpoint: String
     private let apiKeyAccount: String
@@ -132,7 +143,7 @@ struct ChatClient {
     /// - Parameters:
     ///   - endpoint: the configured chat-completions URL, `Settings.cleanupEndpoint` by default.
     ///   - apiKeyAccount: the `KeychainStore` account the configured endpoint's key lives under,
-    ///     `cleanup-groq`, `cleanup-openrouter` or `cleanup-anthropic`.
+    ///     `cleanup-groq`, `cleanup-openrouter`, `cleanup-anthropic` or `cleanup-<host>` for any other.
     ///   - modelId: the fully namespaced model id to send, and to look up in
     ///     `ReasoningSuppression`.
     ///   - session: injected for testability; defaults to `.shared`.
@@ -174,7 +185,7 @@ struct ChatClient {
                 return try await send(messages: messages, maxTokens: maxTokens)
             } catch let error as ChatClientError {
                 attempt += 1
-                guard attempt < maxRetries, isRetryable(error) else {
+                guard attempt < maxRetries, Self.isRetryable(error) else {
                     throw error
                 }
                 try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
@@ -185,16 +196,14 @@ struct ChatClient {
 
     /// A network failure or a 5xx / 429 response is worth retrying; every other error (a missing
     /// key, a bad endpoint, a 4xx that is not rate-limiting, a decoding failure) will not resolve
-    /// itself on a second attempt. A cancelled request is deliberately excluded from
-    /// `networkError`'s retry, matching
-    /// `references/VoiceInk/.../AIEnhancementService.swift:452-471`, which retries only on
-    /// `NSURLErrorNotConnectedToInternet`, `NSURLErrorTimedOut` and
-    /// `NSURLErrorNetworkConnectionLost`, never on `NSURLErrorCancelled`; without this exclusion a
-    /// caller that cancels the request would see it silently retried instead of stopped.
-    private func isRetryable(_ error: ChatClientError) -> Bool {
+    /// itself on a second attempt. A cancelled request is excluded, because a caller that cancels
+    /// would otherwise see it silently retried instead of stopped. A timed-out one is excluded too:
+    /// a provider that just spent `requestTimeoutSeconds` is a poor bet to answer inside the next
+    /// ones, and three of them would hold the dictation for about 48 s before the raw transcript went in.
+    static func isRetryable(_ error: ChatClientError) -> Bool {
         switch error {
         case .networkError(let underlying):
-            if let urlError = underlying as? URLError, urlError.code == .cancelled {
+            if let urlError = underlying as? URLError, urlError.code == .cancelled || urlError.code == .timedOut {
                 return false
             }
             return true
@@ -216,6 +225,7 @@ struct ChatClient {
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        request.timeoutInterval = Self.requestTimeoutSeconds
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if isAnthropic {
             request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
@@ -249,7 +259,7 @@ struct ChatClient {
             throw ChatClientError.serverError(statusCode: httpResponse.statusCode, body: bodyText)
         }
 
-        return isAnthropic ? try Self.anthropicReplyText(from: data) : try Self.chatCompletionsReplyText(from: data)
+        return isAnthropic ? try Self.anthropicReplyText(from: data) : try Self.openAIReplyText(from: data)
     }
 
     /// The `/chat/completions` body, with whatever `ReasoningSuppression` contributes for the model.
@@ -269,7 +279,7 @@ struct ChatClient {
         return try JSONEncoder().encode(body)
     }
 
-    private static func chatCompletionsReplyText(from data: Data) throws -> String {
+    static func openAIReplyText(from data: Data) throws -> String {
         let decoded: ResponseBody
         do {
             decoded = try JSONDecoder().decode(ResponseBody.self, from: data)
@@ -277,7 +287,13 @@ struct ChatClient {
             throw ChatClientError.decodingError(underlying: error)
         }
 
-        guard let content = decoded.choices.first?.message.content, !content.isEmpty else {
+        let choice = decoded.choices.first
+        if let finishReason = choice?.finishReason, ["length", "content_filter"].contains(finishReason) {
+            throw ChatClientError.incompleteReply(stopReason: finishReason)
+        }
+
+        guard let content = choice?.message.content,
+              !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw ChatClientError.emptyResponse
         }
         return content
@@ -359,7 +375,8 @@ extension ChatClient {
             throw ChatClientError.incompleteReply(stopReason: stopReason)
         }
 
-        guard let text = decoded.content.first(where: { $0.type == "text" })?.text, !text.isEmpty else {
+        guard let text = decoded.content.first(where: { $0.type == "text" })?.text,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw ChatClientError.emptyResponse
         }
         return text
