@@ -1,0 +1,77 @@
+[
+  {
+    "id": "01",
+    "text": "Abi socket bağlantısı koptuğunda client tarafında reconnect et, backoff'u exponential yap ki sunucuyu boğmayalım.",
+    "terms": [
+      "socket",
+      "client",
+      "reconnect",
+      "backoff",
+      "exponential"
+    ]
+  },
+  {
+    "id": "02",
+    "text": "fluttersdk için yeni bir wind widget'ı yazacağız. Önce Dart tarafında state'i provider ile yönet, sonra PR açıp CI'ın geçmesini bekle. Analyzer'da tek bir warning bile kalmasın.",
+    "terms": [
+      "fluttersdk",
+      "wind",
+      "widget",
+      "Dart",
+      "state",
+      "provider",
+      "analyzer",
+      "warning"
+    ]
+  },
+  {
+    "id": "03",
+    "text": "kodizm tarafında Laravel queue worker'ı Redis üzerinden çalışıyor ama Kubernetes'e deploy ettiğimizde Grafana'da memory leak görünüyor. Sentry'den stack trace'i çek, sonra Pest testini yazıp PHPStan'i level max'te çalıştır.",
+    "terms": [
+      "kodizm",
+      "Laravel",
+      "queue",
+      "worker",
+      "Redis",
+      "Kubernetes",
+      "deploy",
+      "Grafana",
+      "memory leak",
+      "Sentry",
+      "stack trace",
+      "Pest",
+      "PHPStan"
+    ]
+  },
+  {
+    "id": "04",
+    "text": "Claude Code'a şunu söyle: repository'deki MCP server'ı kontrol et, Groq'tan gelen cevabı Gemini Flash Lite ile karşılaştır, sonra bunu markdown olarak commit et.",
+    "terms": [
+      "Claude Code",
+      "repository",
+      "server",
+      "Groq",
+      "Gemini Flash Lite",
+      "markdown",
+      "commit"
+    ]
+  },
+  {
+    "id": "05",
+    "text": "Abi uptizm'in monitoring ekranında real time güncelleme lazım. Şu an düzenli aralıklarla polling yapıyoruz, bunu WebSocket'e çevirelim. Latency'yi mümkün olduğunca düşük tutmak istiyorum ama test ortamında gecikme gözle görülür derecede yüksek. Önce profiler ile bottleneck'i bul, sonra cache'i Redis'e taşı, en son da load test için k6 ile yüklü bir kullanıcı simülasyonu çalıştır. Yarın sabah deploy edeceğiz, o yüzden bu akşam bitsin.",
+    "terms": [
+      "uptizm",
+      "monitoring",
+      "real time",
+      "polling",
+      "WebSocket",
+      "latency",
+      "profiler",
+      "bottleneck",
+      "cache",
+      "Redis",
+      "load test",
+      "deploy"
+    ]
+  }
+]
