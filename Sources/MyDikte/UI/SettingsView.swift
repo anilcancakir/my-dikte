@@ -491,10 +491,9 @@ private struct ModelsPane: View {
             )
             .onChange(of: settings.rewriteEndpoint) { _, _ in onChange() }
 
-            // The stored endpoint and the endpoint used are not the same string, and showing only
-            // the stored one made this pane read as misconfigured: it says api.openai.com while the
-            // provider says groq, because the untouched OpenAI default is resolved to Groq rather
-            // than sent to OpenAI. The pane now states what the requests will actually go to.
+            // The stored endpoint and the endpoint used are not the same string: an empty field
+            // resolves to Groq, so showing only the stored one made this pane read as unconfigured.
+            // The pane states what the requests will actually go to.
             Text(inUseSummary)
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -546,10 +545,7 @@ private struct ModelsPane: View {
         lines.append("In use now: \(transcription) for transcription.")
         lines.append("\(cleanup) at \(cleanupEndpoint) for cleanup.")
         lines.append("\(rewriteEndpoint) for Mode 2.")
-        lines.append(
-            "An empty field means the built-in default shown in grey, and the untouched OpenAI "
-                + "endpoint resolves to Groq rather than being sent to OpenAI."
-        )
+        lines.append("An empty field means the built-in default shown in grey.")
         return lines.joined(separator: " ")
     }
 }

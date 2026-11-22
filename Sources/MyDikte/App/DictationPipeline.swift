@@ -39,7 +39,7 @@ struct PipelineConfiguration: Sendable, Equatable {
     ///
     /// Raising it is close to free: `max_tokens` is a ceiling and not a charge, so nothing is spent
     /// unless the model actually generates. The reason the budget is bounded at all is a runaway
-    /// reply, which 2048 still prevents.
+    /// reply, which the ceiling still prevents.
     static let minimumReplyTokens = 1536
     static let maximumReplyTokens = 3072
 
@@ -361,8 +361,8 @@ enum InsertionChoice: Sendable, Equatable {
 /// It also owns the live preview, and owns it at arm's length: the preview is started when recording
 /// starts, stopped on every path a run can end on, and its text goes straight from `LivePreview` to
 /// the indicator panel. Nothing on this type ever holds it, so `rawTranscript`, `finalText`, the
-/// cleanup call, the paraphrase guard and the clipboard cannot see it. The authoritative transcript
-/// is still Groq's, unchanged.
+/// cleanup call, the paraphrase guard and the clipboard cannot see it. The transcript still comes
+/// from the configured provider, except when the realtime stream is itself the transcript.
 ///
 /// `@MainActor` because it drives the indicator, the audio cues and the status item. It reaches the
 /// two non-main-actor layers only through their published APIs, and never into `AudioCapture`'s
@@ -663,9 +663,9 @@ final class DictationPipeline {
 
     /// Opens the connection the cleanup or rewrite call will reuse, while the user is still speaking.
     ///
-    /// Measured, and the reason it exists: transcription warms `api.groq.com`, and cleanup now goes to
-    /// `openrouter.ai`, a second host whose DNS lookup and TLS handshake the dictation used to pay for
-    /// on the critical path. A recording lasts seconds and the host is known the moment it starts, so
+    /// Measured, and the reason it exists: transcription goes to one host and cleanup to another (Groq,
+    /// Anthropic or the Kodizm gateway), whose DNS lookup and TLS handshake the dictation used to pay
+    /// for on the critical path. A recording lasts seconds and the host is known the moment it starts, so
     /// the handshake is paid during the recording instead of after the transcription.
     ///
     /// Detached, and nothing waits for it: it must not delay the start of recording, must not write
@@ -1226,7 +1226,7 @@ final class DictationPipeline {
     /// returned no message content", which reads like a provider outage and was not one. The hold was
     /// 3.3 s, 1.6 s of it a Bluetooth link opening, so 1.7 s of audio produced the transcript "Ben
     /// olacak görelim." and the model had nothing to rewrite into a prompt. The same system prompt and
-    /// the same 768-token budget turned a real request into a full structured English prompt on the
+    /// the then 768-token budget turned a real request into a full structured English prompt on the
     /// first try, so the feature was working and the input was not there.
     ///
     /// Only the empty-response case is annotated. A network error or an HTTP status says what it is,
