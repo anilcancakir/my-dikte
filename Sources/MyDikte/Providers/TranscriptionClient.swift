@@ -178,7 +178,7 @@ struct OpenRouterTranscriptionProvider: TranscriptionProvider {
 /// **This is the one provider here whose glossary is a first-class API parameter.** Groq folds it
 /// into a free-text `prompt` that Whisper reads as preceding speech, and OpenRouter discards it
 /// outright (see `OpenRouterTranscriptionProvider`). Scribe takes structured keyterms and bills
-/// $0.05 an hour extra for them, on top of $0.22 an hour for the transcription itself.
+/// $0.05 an hour extra for them, on top of $0.20 an hour for the transcription itself.
 ///
 /// Measured on four real Turkish recordings against Groq `whisper-large-v3`, verbatim in
 /// `evidence/elevenlabs-scribe-comparison.md`. Scribe reads Turkish technical speech better in the
@@ -449,7 +449,7 @@ final class TranscriptionClient: @unchecked Sendable {
         body.appendField(name: provider.modelFieldName, value: provider.modelId)
         let wasTruncated = provider.appendParameters(to: &body, glossaryTerms: glossaryTerms, language: language)
         if wasTruncated {
-            logger.notice("glossary truncated to fit the provider's prompt token cap")
+            logger.notice("terms truncated to fit the provider's cap")
         }
         body.appendFile(name: "file", filename: filename, contentType: "audio/mp4", data: audioData)
         let sealed = body.finalize()

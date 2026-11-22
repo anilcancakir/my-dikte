@@ -55,6 +55,15 @@ struct PipelineConfiguration: Sendable, Equatable {
     let transcriptionModelId: String
     let cleanupModelId: String
     let glossaryTerms: [String]
+
+    /// The vocabulary the transcription request carries. ElevenLabs reads it as keyterms and does
+    /// better when the app's own product and project names ride along with the user's glossary:
+    /// on five of this user's recordings Scribe v3 went from 23% to 15% word errors, with no keyterm
+    /// appearing where it was not spoken, and the terms it was not told about came out better too
+    /// (`bench/stt`). Groq reads the same list as a prompt that unrelated terms crowd out, so it gets
+    /// the glossary alone. The cleanup prompt already carries the names, so `glossaryTerms` stays
+    /// the user's.
+    let transcriptionTerms: [String]
     let autoInsert: Bool
     let retainAudio: Bool
     let historyLimit: Int
@@ -75,6 +84,7 @@ struct PipelineConfiguration: Sendable, Equatable {
         )
         cleanupModelId = Self.resolved(settings.cleanupModelId, default: Self.defaultCleanupModelId)
         glossaryTerms = settings.glossaryTerms
+        transcriptionTerms = Self.transcriptionTerms(for: settings)
         autoInsert = settings.autoInsert
         retainAudio = settings.retainAudio
         historyLimit = settings.historyLimit
@@ -162,6 +172,17 @@ struct PipelineConfiguration: Sendable, Equatable {
     static func maxTokens(forTranscript transcript: String) -> Int {
         let words = transcript.split(whereSeparator: { $0.isWhitespace }).count
         return min(maximumReplyTokens, max(minimumReplyTokens, words * 6 + reasoningHeadroomTokens))
+    }
+
+    /// The user's terms first, because the keyterm cap would cut the end of the list, then the app's
+    /// names, each once whatever its case.
+    private static func transcriptionTerms(for settings: Settings) -> [String] {
+        guard settings.transcriptionProvider == .elevenLabs else {
+            return settings.glossaryTerms
+        }
+
+        var seen = Set<String>()
+        return (settings.glossaryTerms + CleanupPrompt.names).filter { seen.insert($0.lowercased()).inserted }
     }
 
     private static func resolved(_ value: String, default fallback: String) -> String {
@@ -600,7 +621,9 @@ final class DictationPipeline {
         isAwaitingMicLiveCue = true
         // After the capture is up, so nothing about the preview can sit between the shortcut and the
         // first recorded buffer. It reports why there is no preview to the log and returns; there is
-        // no failure path from here into the dictation.
+        // no failure path from here into the dictation. The preview keeps the user's glossary alone:
+        // Scribe v3 Live was not measured with the app's names, its cap is 50 terms of 20 characters,
+        // and its keyterms bill extra.
         livePreview.start(
             provider: configuration.livePreviewProvider,
             isEnabledInSettings: configuration.livePreviewEnabled,
@@ -850,7 +873,7 @@ final class DictationPipeline {
                 }
                 let transcription = try await client(for: configuration).transcribe(
                     audioData: audioData,
-                    glossaryTerms: configuration.glossaryTerms
+                    glossaryTerms: configuration.transcriptionTerms
                 )
                 raw = transcription.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 transcribedWith = configuration.transcriptionModelId

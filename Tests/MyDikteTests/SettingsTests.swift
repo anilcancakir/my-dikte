@@ -137,7 +137,7 @@ struct SettingsPersistenceTests {
         #expect(Set(accounts).count == accounts.count)
 
         #expect(Settings.TranscriptionProvider.elevenLabs.keychainAccount == "transcription-elevenlabs")
-        #expect(Settings.TranscriptionProvider.elevenLabs.defaultModelId == "scribe_v2")
+        #expect(Settings.TranscriptionProvider.elevenLabs.defaultModelId == "scribe_v3")
         #expect(Settings.TranscriptionProvider.groq.defaultModelId == "whisper-large-v3")
         #expect(Settings.TranscriptionProvider.openAI.defaultModelId == "gpt-4o-transcribe")
     }

@@ -322,9 +322,9 @@ private struct GlossaryPane: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("One term per line. This is the exact list sent as the transcription prompt and the "
-                + "cleanup vocabulary block. Keep it short and keep it relevant: measured on this "
-                + "machine, the same recording came back with \"LLM-friendly\" correct under six "
+            Text("One term per line. This list is sent as the transcription prompt (on ElevenLabs the "
+                + "app's own names follow it) and as the cleanup vocabulary block. Keep it short and "
+                + "keep it relevant: measured on this machine, the same recording came back with \"LLM-friendly\" correct under six "
                 + "focused terms and lost it under nineteen. Whisper reads this field as text preceding "
                 + "the audio, so unrelated terms crowd out the ones that matter rather than sitting "
                 + "harmlessly beside them. Add a term because you say it often, not in case you might.")
@@ -437,7 +437,7 @@ private struct ModelsPane: View {
                 "Transcription model id",
                 text: $settings.transcriptionModelId,
                 // Per provider, because the ids are not interchangeable: leaving this empty on
-                // ElevenLabs means `scribe_v2`, and showing Groq's model there would be a lie.
+                // ElevenLabs means `scribe_v3`, and showing Groq's model there would be a lie.
                 prompt: Text(settings.transcriptionProvider.defaultModelId)
             )
             .onChange(of: settings.transcriptionModelId) { _, _ in onChange() }
@@ -512,9 +512,9 @@ private struct ModelsPane: View {
             return "On device, tr-TR, free, and the audio never leaves this machine. Reads Turkish "
                 + "technical terms less well than the paid option."
         case .elevenLabs:
-            return "Streams the microphone to ElevenLabs \(ElevenLabsLivePreview.modelId) at $0.39 per "
-                + "audio hour. Needs the ElevenLabs key on the Keys pane. With the live preview on, "
-                + "its transcript is also the pasted text unless the upload below is turned on."
+            return "Streams the microphone to ElevenLabs \(ElevenLabsLivePreview.modelId) at $0.22 per "
+                + "audio hour, plus $0.08 when a glossary is sent. Needs the ElevenLabs key on the Keys "
+                + "pane. With the live preview on, its transcript is also the pasted text unless the upload below is turned on."
         }
     }
 
@@ -523,13 +523,13 @@ private struct ModelsPane: View {
     private var batchVerificationSummary: String {
         if settings.batchVerification {
             return "The realtime stream draws the live text and the audio is also uploaded to the "
-                + "transcription model above, whose answer is the one pasted. With scribe_v2 that is "
+                + "transcription model above, whose answer is the one pasted. With scribe_v3 that is "
                 + "more accurate on longer recordings, about a second slower, and it bills the same "
-                + "audio twice ($0.61 an audio hour)."
+                + "audio twice ($0.47 to $0.55 an audio hour, keyterms included)."
         }
         return "The realtime stream is the transcript, so one dictation costs one transcription "
-            + "($0.39 an audio hour) and the text lands 200 to 520 ms after you stop. This is how "
-            + "ElevenLabs' own examples use it. Measured cost: the realtime model reads longer "
+            + "($0.22 an audio hour, $0.30 with a glossary) and the text lands 200 to 520 ms after you "
+            + "stop. This is how ElevenLabs' own examples use it. Measured cost: the realtime model reads longer "
             + "technical speech worse than the batch one, and has dropped glossary terms it was given."
     }
 

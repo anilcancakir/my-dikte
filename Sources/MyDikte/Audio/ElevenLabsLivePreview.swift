@@ -26,7 +26,7 @@ import os
 /// page recommends, keeps every segment in a `Transcript`, and treats the session as finished once
 /// every commit it sent has been answered.
 ///
-/// **This one costs money**, unlike the on-device preview: $0.39 per audio hour, and it sends
+/// **This one costs money**, unlike the on-device preview: $0.22 per audio hour, and it sends
 /// microphone audio off the machine. Both of those are why `Settings.livePreviewProvider` exists.
 ///
 /// **Deliberately not `@MainActor`,** for the same reason `AudioCapture` and `LivePreview` are not:

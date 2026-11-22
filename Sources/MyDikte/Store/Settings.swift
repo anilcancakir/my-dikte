@@ -76,7 +76,7 @@ struct Settings: Codable, Equatable {
             case .openAI:
                 return "gpt-4o-transcribe"
             case .elevenLabs:
-                return "scribe_v2"
+                return "scribe_v3"
             }
         }
     }

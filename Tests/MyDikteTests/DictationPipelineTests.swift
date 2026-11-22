@@ -462,6 +462,38 @@ struct PipelineConfigurationTests {
         #expect(configuration.chatEndpoint(for: .dictate) == PipelineConfiguration.groqChatEndpoint)
     }
 
+    @Test("ElevenLabs transcription carries the user's glossary first, then the app's own names, each once")
+    func elevenLabsTranscriptionTermsAddTheAppsNames() {
+        var settings = Settings.default
+        settings.transcriptionProvider = .elevenLabs
+        settings.glossaryTerms = ["Kodizm", "fluttersdk", "zzzterm"]
+
+        let terms = PipelineConfiguration(settings: settings).transcriptionTerms
+
+        #expect(Array(terms.prefix(3)) == ["Kodizm", "fluttersdk", "zzzterm"])
+        #expect(terms.contains("Claude Code"))
+        #expect(terms.filter { $0.lowercased() == "kodizm" }.count == 1)
+        #expect(Set(terms.map { $0.lowercased() }).count == terms.count)
+    }
+
+    @Test("Groq keeps the glossary alone as its prompt, because unrelated terms crowd a prompt out")
+    func groqTranscriptionTermsStayTheGlossary() {
+        var settings = Settings.default
+        settings.transcriptionProvider = .groq
+        settings.glossaryTerms = ["zzzterm"]
+
+        #expect(PipelineConfiguration(settings: settings).transcriptionTerms == ["zzzterm"])
+    }
+
+    @Test("the cleanup glossary is untouched by the names added to the transcription request")
+    func cleanupGlossaryStaysTheUsers() {
+        var settings = Settings.default
+        settings.transcriptionProvider = .elevenLabs
+        settings.glossaryTerms = ["zzzterm"]
+
+        #expect(PipelineConfiguration(settings: settings).glossaryTerms == ["zzzterm"])
+    }
+
     @Test("the Keychain account follows the endpoint host, never a silent fallback to the other key")
     func keychainAccountFollowsTheEndpoint() {
         #expect(
