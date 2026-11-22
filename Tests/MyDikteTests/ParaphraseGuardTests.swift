@@ -436,6 +436,51 @@ struct ParaphraseGuardTests {
         #expect(result == .accept)
     }
 
+    /// A raw stem of one or two letters is a substring of half the dictionary, so it cannot be
+    /// allowed to vouch for a cleaned word that merely contains it: raw "o" sits inside "now".
+    @Test("a one-letter raw word does not license a cleaned word that contains it")
+    func shortRawStemDoesNotLicenseALongerWord() {
+        let result = ParaphraseGuard.check(
+            raw: "o zaman hemen düzelt",
+            cleaned: "o zaman now düzelt",
+            glossary: []
+        )
+        guard case .concern(let concern) = result else {
+            Issue.record("expected .concern, got \(result)")
+            return
+        }
+        #expect(concern.kind == .introducedWord)
+        #expect(concern.term == "now")
+    }
+
+    /// The recogniser splits a short root from its suffix and cleanup joins them back; the roots are
+    /// under the minimum length, so only the join itself can vouch for the word.
+    @Test("a word cleanup made by joining two adjacent raw words is not introduced", arguments: [
+        ("evde çalışıyorum", "ev de çalışıyorum"),
+        ("onu hemen düzelt", "o nu hemen düzelt"),
+        ("suyu aç", "su yu aç"),
+    ])
+    func joiningAdjacentRawWordsIsNotIntroduction(cleaned: String, raw: String) {
+        let result = ParaphraseGuard.check(raw: raw, cleaned: cleaned, glossary: [])
+
+        #expect(result == .accept)
+    }
+
+    @Test("a two-letter glossary entry does not license a cleaned word that contains it")
+    func shortGlossaryStemDoesNotLicenseALongerWord() {
+        let result = ParaphraseGuard.check(
+            raw: "toplantıyı hemen yapalım",
+            cleaned: "toplantıyı kabul yapalım",
+            glossary: ["ab"]
+        )
+        guard case .concern(let concern) = result else {
+            Issue.record("expected .concern, got \(result)")
+            return
+        }
+        #expect(concern.kind == .introducedWord)
+        #expect(concern.term == "kabul")
+    }
+
     /// The exemption is a closed list of function words and must not become a general amnesty for
     /// short words: a three-letter Turkish content word swapped in is exactly the substitution the
     /// introduced-word check exists to catch, which is why the fix is a list and not a raised

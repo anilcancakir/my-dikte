@@ -225,7 +225,9 @@ public enum ParaphraseGuard {
             if turkishFunctionWords.contains(word) {
                 continue
             }
-            if glossaryStems.contains(where: { $0.contains(word) || word.contains($0) }) {
+            // A stem under the minimum length is a substring of half the dictionary, so it only counts
+            // as the longer side of the match: raw "o" must not license "now".
+            if glossaryStems.contains(where: { shares(word, stem: $0) }) {
                 continue
             }
             // The name itself, or the name with a Turkish suffix ("kodizm" in "kodizmde"). A short
@@ -233,7 +235,10 @@ public enum ParaphraseGuard {
             if targetStems.contains(where: { isRepair(word, of: $0) }) {
                 continue
             }
-            if rawStems.contains(where: { $0.contains(word) || word.contains($0) }) {
+            if rawStems.contains(where: { shares(word, stem: $0) }) {
+                continue
+            }
+            if joinsAdjacentStems(word, in: rawStems) {
                 continue
             }
             if rawStems.contains(where: { soundsLike(word, $0) }) {
@@ -408,6 +413,19 @@ public enum ParaphraseGuard {
     /// Words shorter than this are exempt from the introduced-word check: they carry too little
     /// meaning to be a paraphrase and they collide with longer words by chance.
     private static let minimumComparableLength: Int = 3
+
+    /// Whether `word` and `stem` contain one another, where `stem` containing `word` always counts but
+    /// `word` containing `stem` only counts once the stem is long enough not to match by accident.
+    private static func shares(_ word: String, stem: String) -> Bool {
+        stem.contains(word) || (stem.count >= minimumComparableLength && word.contains(stem))
+    }
+
+    /// Whether `word` is two neighbouring raw stems written as one. The recogniser splits a short root
+    /// from its suffix ("ev de") and cleanup joins them back ("evde"); each part is under the minimum
+    /// length, so `shares` cannot vouch for the join and only the join itself can.
+    private static func joinsAdjacentStems(_ word: String, in stems: [String]) -> Bool {
+        zip(stems, stems.dropFirst()).contains { $0 + $1 == word }
+    }
 
     /// Whether `word` is `target`, or `target` with a suffix when the target is long enough for that.
     private static func isRepair(_ word: String, of target: String) -> Bool {
